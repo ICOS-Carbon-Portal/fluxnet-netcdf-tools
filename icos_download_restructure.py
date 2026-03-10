@@ -50,7 +50,7 @@ _STATION_RE = re.compile(r"ICOSETC_([^_]+-\w+)_ARCHIVE", re.IGNORECASE)
 
 def resolve_collection_url(doi: str) -> str:
     """Resolve a DOI to its ICOS CP collection URL via JSON-LD content negotiation."""
-    doi = doi.strip().lstrip("https://doi.org/").lstrip("http://doi.org/")
+    doi = doi.strip().removeprefix("https://doi.org/").removeprefix("http://doi.org/")
     req = urllib.request.Request(
         f"https://doi.org/{doi}",
         headers={"Accept": "application/ld+json"},
@@ -205,7 +205,7 @@ def main() -> None:
     outdir: Path = args.outdir.resolve()
     outdir.mkdir(parents=True, exist_ok=True)
 
-    doi = args.doi.strip().lstrip("https://doi.org/").lstrip("http://doi.org/")
+    doi = args.doi.strip().removeprefix("https://doi.org/").removeprefix("http://doi.org/")
     station_filter = {s.upper() for s in args.station}
 
     # ── Step 1: resolve DOI → collection → archive list ──────────────────────
@@ -245,9 +245,11 @@ def main() -> None:
         print(f"Station {site_id}")
 
         # ── Download ─────────────────────────────────────────────────────────
+        download_ok = False
         for attempt in (1, 2):
             try:
                 download_zip(arch["hash_id"], zip_path, label=site_id)
+                download_ok = True
                 break
             except Exception as exc:
                 if attempt == 1:
@@ -256,8 +258,8 @@ def main() -> None:
                 else:
                     print(f"  ERROR: download failed twice: {exc}")
                     failed.append((site_id, f"download: {exc}"))
-                    zip_path = None  # type: ignore[assignment]
-        if zip_path is None or not zip_path.exists():
+                    zip_path.unlink(missing_ok=True)
+        if not download_ok:
             continue
 
         # ── Extract ──────────────────────────────────────────────────────────

@@ -51,24 +51,22 @@ from fluxnet2nc import (
     FILL_VALUE_OUT,
     _FREQ_ISO,
     _FREQ_OFFSET,
+    _GLOBAL_ATTRS,
     _build_long_name,
+    _choose_int_dtype,
     _detect_freq_code,
     _get_standard_name,
     _get_units,
+    _group_name,
+    _infer_freq_code,
     _parse_timestamps,
+    _product_priority,
+    _read_csv,
     _to_cf_time,
     fetch_doi_citation,
     fetch_icos_station_meta,
     parse_filename,
 )
-
-# ── Product priority (same as icos_combined.py) ───────────────────────────────
-_PRIORITY_ORDER: list[tuple[str, int]] = [
-    ("FLUXNET",   0),
-    ("FLUXES",    1),
-    ("METEOSENS", 2),
-    ("METEO",     3),
-]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Dimension labels for the new coordinate axes
@@ -834,17 +832,9 @@ def _write_1d_vars(grp: nc.Dataset, df: pd.DataFrame,
             safe = np.where(mask, 0.0, f64)
             # Promote integer-valued float columns to a compact signed integer
             # NC type (e.g. RANDUNC_METHOD = 1|2 → i1,  RANDUNC_N ≤ 509 → i2)
-            if not np.any(safe != np.floor(safe)):
-                vmax = int(safe.max()) if safe.size else 0
-                vmin = int(safe.min()) if safe.size else 0
-                if -128 <= vmin and vmax <= 127:
-                    dtype, fv = "i1", np.int8(-1)
-                elif -32768 <= vmin and vmax <= 32767:
-                    dtype, fv = "i2", np.int16(-9999)
-                elif vmax <= 2_147_483_647:
-                    dtype, fv = "i4", np.int32(-9999)
-                else:
-                    dtype, fv = "i8", np.int64(-9999)
+            result = _choose_int_dtype(f64[~mask])
+            if result is not None:
+                dtype, fv = result
                 arr = np.where(mask, fv, safe.astype(np.dtype(dtype)))
             else:
                 dtype, fv = "f4", _FV_F32
@@ -879,7 +869,8 @@ def _write_1d_vars(grp: nc.Dataset, df: pd.DataFrame,
             sn = _get_standard_name(col)
             if sn:
                 var.standard_name = sn
-            var.fluxnet_missing_value = np.int32(FILL_VALUE_IN)
+            if dtype == "f4":
+                var.fluxnet_missing_value = np.int32(FILL_VALUE_IN)
 
         var[:] = arr
         written.add(col)
@@ -911,20 +902,6 @@ def _write_group(
 
     Pass *grp=root_ds* to write directly into the root dataset (HH data).
     """
-    _GLOBAL_ATTRS = ("Conventions", "title", "institution", "site_id",
-                     "featureType", "history", "comment", "references",
-                     "icos_landing_page", "geospatial_lat", "geospatial_lon",
-                     "station_elevation", "station_elevation_units",
-                     "country", "icos_station_class", "icos_labeling_date",
-                     "time_zone", "ecosystem", "climate_zone",
-                     "mean_annual_temperature", "mean_annual_temperature_units",
-                     "mean_annual_precipitation", "mean_annual_precipitation_units",
-                     "mean_annual_sw_radiation", "mean_annual_sw_radiation_units",
-                     "icos_documentation", "principal_investigator",
-                     "researcher", "data_manager",
-                     "station_engineer", "station_administrator",
-                     "source_doi", "PartOfDataset")
-
     if grp is None:
         grp = root_ds.createGroup(grp_name)
         for attr in _GLOBAL_ATTRS:
@@ -983,47 +960,6 @@ def _write_group(
           f"  +  {n_1d:3d} 1-D var(s)")
 
     return written
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CSV reading / merging helpers (shared with icos_combined.py logic)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _read_csv(csv_path: Path) -> pd.DataFrame:
-    na_vals = [str(FILL_VALUE_IN), str(float(FILL_VALUE_IN)), FILL_VALUE_IN]
-    with open(csv_path, encoding="utf-8") as fh:
-        line1 = fh.readline().rstrip("\n")
-        line2 = fh.readline().rstrip("\n")
-    if not line2.split(",")[0].strip().isdigit():
-        columns = (line1 + line2).split(",")
-        return pd.read_csv(csv_path, header=None, skiprows=2, names=columns,
-                           na_values=na_vals, low_memory=False)
-    return pd.read_csv(csv_path, na_values=na_vals, low_memory=False)
-
-
-def _infer_freq_code(ts_start: pd.DatetimeIndex) -> str:
-    freq_min = int((ts_start[1] - ts_start[0]).total_seconds() / 60)
-    if freq_min <= 60:      return "HH"
-    if freq_min <= 1_441:   return "DD"
-    if freq_min <= 10_081:  return "WW"
-    if freq_min <= 44_641:  return "MM"
-    return "YY"
-
-
-def _group_name(csv_path: Path) -> str:
-    finfo   = parse_filename(csv_path)
-    product = finfo.get("product", csv_path.stem)
-    name = re.sub(r"_(INTERIM|L[0-9]).*", "", product, flags=re.IGNORECASE)
-    name = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").lower()
-    return name or "data"
-
-
-def _product_priority(csv_path: Path) -> int:
-    stem_up = csv_path.stem.upper()
-    for prod, pri in _PRIORITY_ORDER:
-        if prod in stem_up:
-            return pri
-    return 99
 
 
 def _qc_norm(col: str) -> str:

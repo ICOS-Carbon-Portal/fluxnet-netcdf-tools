@@ -22,7 +22,6 @@ Dependencies:
 """
 
 import argparse
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,48 +36,24 @@ from fluxnet2nc import (
     FILL_VALUE_OUT,
     _FREQ_ISO,
     _FREQ_OFFSET,
+    _GLOBAL_ATTRS,
     _build_long_name,
+    _choose_int_dtype,
     _detect_freq_code,
     _get_standard_name,
     _get_units,
+    _group_name,
+    _infer_freq_code,
     _parse_timestamps,
+    _product_priority,
+    _read_csv,
     _to_cf_time,
     fetch_doi_citation,
     fetch_icos_station_meta,
     parse_filename,
 )
 
-# ── Product priority for deduplication within the same temporal resolution ────
-# Lower number = higher priority.  A variable already written by a
-# higher-priority product is skipped when writing lower-priority products.
-# NOTE: METEOSENS must be checked before METEO to avoid the substring match.
-_PRIORITY_ORDER: list[tuple[str, int]] = [
-    ("FLUXNET",   0),
-    ("FLUXES",    1),
-    ("METEOSENS", 2),   # checked before METEO (METEO ⊂ METEOSENS string)
-    ("METEO",     3),
-]
-
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _group_name(csv_path: Path) -> str:
-    """Derive a safe NetCDF4 group name from an ICOS filename."""
-    finfo   = parse_filename(csv_path)
-    product = finfo.get("product", csv_path.stem)
-    # Strip trailing level/interim suffixes: _INTERIM_L2, _L2, etc.
-    name = re.sub(r"_(INTERIM|L[0-9]).*", "", product, flags=re.IGNORECASE)
-    name = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").lower()
-    return name or "data"
-
-
-def _product_priority(csv_path: Path) -> int:
-    stem_up = csv_path.stem.upper()
-    for prod, pri in _PRIORITY_ORDER:
-        if prod in stem_up:
-            return pri
-    return 99
-
 
 def _qc_norm(col: str) -> str:
     """Normalize QC/FLAG suffix so VAR_QC and VAR_FLAG map to the same key."""
@@ -87,35 +62,6 @@ def _qc_norm(col: str) -> str:
     if col.endswith("_FLAG"):
         return col[:-5]
     return col
-
-
-def _read_csv(csv_path: Path) -> pd.DataFrame:
-    """Read a FLUXNET/ICOS CSV, handling two-line wrapped headers."""
-    na_vals = [str(FILL_VALUE_IN), str(float(FILL_VALUE_IN)), FILL_VALUE_IN]
-    with open(csv_path, encoding="utf-8") as fh:
-        line1 = fh.readline().rstrip("\n")
-        line2 = fh.readline().rstrip("\n")
-    if not line2.split(",")[0].strip().isdigit():
-        columns = (line1 + line2).split(",")
-        return pd.read_csv(
-            csv_path, header=None, skiprows=2, names=columns,
-            na_values=na_vals, low_memory=False,
-        )
-    return pd.read_csv(csv_path, na_values=na_vals, low_memory=False)
-
-
-def _infer_freq_code(ts_start: pd.DatetimeIndex) -> str:
-    """Guess the FLUXNET frequency code from the spacing between the first two timestamps."""
-    freq_min = int((ts_start[1] - ts_start[0]).total_seconds() / 60)
-    if freq_min <= 60:
-        return "HH"
-    if freq_min <= 1_441:
-        return "DD"
-    if freq_min <= 10_081:
-        return "WW"
-    if freq_min <= 44_641:
-        return "MM"
-    return "YY"
 
 
 def _write_group(
@@ -136,20 +82,6 @@ def _write_group(
     Child groups inherit the root-level global attributes so that every group
     is self-describing when opened in isolation.
     """
-    _GLOBAL_ATTRS = ("Conventions", "title", "institution", "site_id",
-                     "featureType", "history", "comment",
-                     "icos_landing_page", "geospatial_lat", "geospatial_lon",
-                     "station_elevation", "station_elevation_units",
-                     "country", "icos_station_class", "icos_labeling_date",
-                     "time_zone", "ecosystem", "climate_zone",
-                     "mean_annual_temperature", "mean_annual_temperature_units",
-                     "mean_annual_precipitation", "mean_annual_precipitation_units",
-                     "mean_annual_sw_radiation", "mean_annual_sw_radiation_units",
-                     "icos_documentation", "principal_investigator",
-                     "researcher", "data_manager",
-                     "station_engineer", "station_administrator",
-                     "source_doi", "PartOfDataset")
-
     if grp is None:
         grp = root_ds.createGroup(grp_name)
         # Propagate root global attributes to the child group
@@ -221,24 +153,14 @@ def _write_group(
             except (ValueError, TypeError):
                 skipped.append(col)
                 continue
-            safe = np.where(mask, 0.0, f64)
-            if not np.any(safe[~mask] != np.floor(safe[~mask])) and safe[~mask].size:
-                # Integer-valued column: promote to smallest signed integer type
-                vmin = int(safe[~mask].min())
-                vmax = int(safe[~mask].max())
-                if -128 <= vmin and vmax <= 127:
-                    dtype, fv = "i1", np.int8(-1)
-                elif -32_768 <= vmin and vmax <= 32_767:
-                    dtype, fv = "i2", np.int16(-9999)
-                elif vmax <= 2_147_483_647:
-                    dtype, fv = "i4", np.int32(-9999)
-                else:
-                    dtype, fv = "i8", np.int64(-9999)
+            safe  = np.where(mask, 0.0, f64)
+            int_t = _choose_int_dtype(safe[~mask])
+            if int_t:
+                dtype, fv = int_t
                 arr = np.where(mask, fv, safe.astype(np.dtype(dtype)))
             else:
-                dtype = "f4"
-                fv    = FILL_VALUE_OUT
-                arr   = np.where(mask, fv, f64.astype(np.float32))
+                dtype, fv = "f4", FILL_VALUE_OUT
+                arr = np.where(mask, fv, f64.astype(np.float32))
 
         var = grp.createVariable(
             col, dtype, ("time",), fill_value=fv, zlib=True, complevel=4,

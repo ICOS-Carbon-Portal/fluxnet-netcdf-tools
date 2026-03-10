@@ -274,11 +274,55 @@ _FREQ_ISO: dict[str, str] = {
 
 # Period length used to compute time_bounds end when TIMESTAMP_END is absent
 _FREQ_OFFSET: dict[str, pd.DateOffset] = {
+    "HH": pd.DateOffset(minutes=30),
+    "HR": pd.DateOffset(hours=1),
     "DD": pd.DateOffset(days=1),
     "WW": pd.DateOffset(weeks=1),
     "MM": pd.DateOffset(months=1),
     "YY": pd.DateOffset(years=1),
 }
+
+# ── Product priority for deduplication (lower = higher priority) ──────────────
+# NOTE: METEOSENS must be listed before METEO to avoid substring match.
+_PRIORITY_ORDER: list[tuple[str, int]] = [
+    ("FLUXNET",   0),
+    ("FLUXES",    1),
+    ("METEOSENS", 2),
+    ("METEO",     3),
+]
+
+# Global attributes propagated to every child group so each group is
+# self-describing when opened in isolation.
+_GLOBAL_ATTRS: tuple[str, ...] = (
+    "Conventions", "title", "institution", "site_id",
+    "featureType", "history", "comment", "references",
+    "icos_landing_page", "geospatial_lat", "geospatial_lon",
+    "station_elevation", "station_elevation_units",
+    "country", "icos_station_class", "icos_labeling_date",
+    "time_zone", "ecosystem", "climate_zone",
+    "mean_annual_temperature", "mean_annual_temperature_units",
+    "mean_annual_precipitation", "mean_annual_precipitation_units",
+    "mean_annual_sw_radiation", "mean_annual_sw_radiation_units",
+    "icos_documentation", "principal_investigator",
+    "researcher", "data_manager",
+    "station_engineer", "station_administrator",
+    "source_doi", "PartOfDataset",
+)
+
+
+def _choose_int_dtype(valid: np.ndarray) -> tuple[str, np.generic] | None:
+    """Return (nc_dtype, fill_value) if *valid* contains only integer values, else None.
+
+    *valid* must be the non-masked subset of a float64 column
+    (i.e. already filtered with ``safe[~mask]``).
+    """
+    if not (valid.size and not np.any(valid != np.floor(valid))):
+        return None
+    vmin, vmax = int(valid.min()), int(valid.max())
+    if -128 <= vmin and vmax <= 127:        return "i1", np.int8(-1)
+    if -32_768 <= vmin and vmax <= 32_767:  return "i2", np.int16(-9999)
+    if vmax <= 2_147_483_647:               return "i4", np.int32(-9999)
+    return "i8", np.int64(-9999)
 
 
 def _detect_freq_code(path: Path) -> str | None:
@@ -310,7 +354,7 @@ def fetch_icos_station_meta(site_id: str) -> dict:
             data = json.load(resp)
     except Exception as exc:
         print(f"  WARNING: could not fetch ICOS metadata for {site_id}: {exc}",
-              file=__import__("sys").stderr)
+              file=sys.stderr)
         return {}
 
     attrs: dict = {}
@@ -392,10 +436,9 @@ def fetch_doi_citation(doi: str) -> tuple[str, str]:
     Strips any HTML tags from the returned citation text.
     Returns ('', '') on any error.
     """
-    import re
     import urllib.request
 
-    doi = doi.strip().lstrip("https://doi.org/").lstrip("http://doi.org/")
+    doi = doi.strip().removeprefix("https://doi.org/").removeprefix("http://doi.org/")
     doi_url = f"https://doi.org/{doi}"
     try:
         req = urllib.request.Request(
@@ -422,6 +465,53 @@ def _sibling_csv(hh_csv: Path, hh_token: str, freq_code: str) -> Path:
         return hh_csv.parent / f"{stem}_{freq_code}{hh_csv.suffix}"
     new_stem = stem[:idx] + f"_{freq_code}_" + stem[idx + len(marker):]
     return hh_csv.parent / (new_stem + hh_csv.suffix)
+
+
+# ── Shared CSV / product helpers (also imported by icos_combined and fluxnet_restructure)
+
+def _read_csv(csv_path: Path) -> pd.DataFrame:
+    """Read a FLUXNET/ICOS CSV, handling two-line wrapped headers."""
+    na_vals = [str(FILL_VALUE_IN), str(float(FILL_VALUE_IN)), FILL_VALUE_IN]
+    with open(csv_path, encoding="utf-8") as fh:
+        line1 = fh.readline().rstrip("\n")
+        line2 = fh.readline().rstrip("\n")
+    if not line2.split(",")[0].strip().isdigit():
+        columns = (line1 + line2).split(",")
+        return pd.read_csv(
+            csv_path, header=None, skiprows=2, names=columns,
+            na_values=na_vals, low_memory=False,
+        )
+    return pd.read_csv(csv_path, na_values=na_vals, low_memory=False)
+
+
+def _infer_freq_code(ts_start: pd.DatetimeIndex) -> str:
+    """Guess the FLUXNET frequency code from the spacing between the first two timestamps."""
+    if len(ts_start) < 2:
+        return "HH"
+    freq_min = int((ts_start[1] - ts_start[0]).total_seconds() / 60)
+    if freq_min <= 60:      return "HH"
+    if freq_min <= 1_441:   return "DD"
+    if freq_min <= 10_081:  return "WW"
+    if freq_min <= 44_641:  return "MM"
+    return "YY"
+
+
+def _group_name(csv_path: Path) -> str:
+    """Derive a safe NetCDF4 group name from an ICOS filename."""
+    finfo   = parse_filename(csv_path)
+    product = finfo.get("product", csv_path.stem)
+    name = re.sub(r"_(INTERIM|L[0-9]).*", "", product, flags=re.IGNORECASE)
+    name = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").lower()
+    return name or "data"
+
+
+def _product_priority(csv_path: Path) -> int:
+    """Return the product priority for deduplication (lower = higher priority)."""
+    stem_up = csv_path.stem.upper()
+    for prod, pri in _PRIORITY_ORDER:
+        if prod in stem_up:
+            return pri
+    return 99
 
 
 # ── Main conversion ───────────────────────────────────────────────────────────
@@ -538,7 +628,7 @@ def convert(csv_path: Path, nc_path: Path, args: argparse.Namespace) -> None:
             )
             if "FLUXNET" in product:
                 _tok = freq_code or "HH"
-                ds.data_type_label     = f"ETC L2 FLUXNET"
+                ds.data_type_label     = "ETC L2 FLUXNET"
                 ds.summary             = (
                     "Standard FLUXNET product including gap-filled NEE, GPP, "
                     "RECO and all the related variables and uncertainty estimates, and "
@@ -680,24 +770,14 @@ def convert(csv_path: Path, nc_path: Path, args: argparse.Namespace) -> None:
                 except (ValueError, TypeError):
                     skipped.append(col)
                     continue
-                safe = np.where(mask, 0.0, f64)
-                valid = safe[~mask]
-                if valid.size and not np.any(valid != np.floor(valid)):
-                    # Integer-valued column: promote to smallest signed int type
-                    vmin, vmax = int(valid.min()), int(valid.max())
-                    if -128 <= vmin and vmax <= 127:
-                        dtype, fv = "i1", np.int8(-1)
-                    elif -32_768 <= vmin and vmax <= 32_767:
-                        dtype, fv = "i2", np.int16(-9999)
-                    elif vmax <= 2_147_483_647:
-                        dtype, fv = "i4", np.int32(-9999)
-                    else:
-                        dtype, fv = "i8", np.int64(-9999)
+                safe  = np.where(mask, 0.0, f64)
+                int_t = _choose_int_dtype(safe[~mask])
+                if int_t:
+                    dtype, fv = int_t
                     arr = np.where(mask, fv, safe.astype(np.dtype(dtype)))
                 else:
-                    dtype = "f4"
-                    fv    = FILL_VALUE_OUT
-                    arr   = np.where(mask, fv, f64.astype(np.float32))
+                    dtype, fv = "f4", FILL_VALUE_OUT
+                    arr = np.where(mask, fv, f64.astype(np.float32))
 
             var = ds.createVariable(
                 col, dtype, ("time",),
