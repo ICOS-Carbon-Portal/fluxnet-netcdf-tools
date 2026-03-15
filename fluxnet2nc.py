@@ -32,6 +32,7 @@ FILL_VALUE_OUT = np.float32(9.96921e+36)   # standard NetCDF _FillValue
 # Per-process caches so sibling DD/WW/MM/YY files don't re-fetch
 _station_meta_cache: dict[str, dict] = {}
 _doi_citation_cache: dict[str, tuple[str, str]] = {}
+_dobj_citation_cache: dict[str, tuple[str, str]] = {}
 
 # ── Variable metadata: root name → (CF standard_name | None, long_name, units)
 VAR_META: dict[str, tuple] = {
@@ -306,7 +307,7 @@ _GLOBAL_ATTRS: tuple[str, ...] = (
     "icos_documentation", "principal_investigator",
     "researcher", "data_manager",
     "station_engineer", "station_administrator",
-    "source_doi", "PartOfDataset",
+    "source_doi", "PartOfDataset", "citation",
 )
 
 
@@ -454,6 +455,45 @@ def fetch_doi_citation(doi: str) -> tuple[str, str]:
     # Strip HTML tags (e.g. <i>...</i> used for journal/book titles)
     citation = re.sub(r"<[^>]+>", "", citation)
     return doi_url, citation
+
+
+def fetch_dobj_citation(res_url: str) -> tuple[str, str]:
+    """Return (pid_url, citation_string) for an ICOS CP data object.
+
+    Fetches the data object's JSON metadata from *res_url*
+    (e.g. ``https://meta.icos-cp.eu/objects/{hash}``), and extracts:
+    - ``references.citationString`` — the pre-formatted citation
+    - ``pid``                       — used to build the handle URL
+      ``https://hdl.handle.net/{pid}``
+
+    Returns ('', '') on any error or if the fields are absent.
+    """
+    import json
+    import urllib.request
+
+    if res_url in _dobj_citation_cache:
+        return _dobj_citation_cache[res_url]
+
+    try:
+        req = urllib.request.Request(
+            res_url, headers={"Accept": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.load(resp)
+    except Exception as exc:
+        print(
+            f"  WARNING: could not fetch data object metadata from {res_url}: {exc}",
+            file=sys.stderr,
+        )
+        _dobj_citation_cache[res_url] = ("", "")
+        return ("", "")
+
+    citation = data.get("references", {}).get("citationString", "") or ""
+    pid      = data.get("pid", "") or ""
+    pid_url  = f"https://hdl.handle.net/{pid}" if pid else ""
+    result   = (pid_url, citation)
+    _dobj_citation_cache[res_url] = result
+    return result
 
 
 def _sibling_csv(hh_csv: Path, hh_token: str, freq_code: str) -> Path:
@@ -607,14 +647,24 @@ def convert(csv_path: Path, nc_path: Path, args: argparse.Namespace) -> None:
             setattr(ds, attr_key, attr_val)
 
         # ── DOI / PartOfDataset ───────────────────────────────────────────────
-        doi_arg = getattr(args, "doi", "")
-        if doi_arg and doi_arg not in _doi_citation_cache:
-            print(f"  Fetching APA citation for DOI {doi_arg} …")
-            _doi_citation_cache[doi_arg] = fetch_doi_citation(doi_arg)
-        if doi_arg and _doi_citation_cache.get(doi_arg, ("", ""))[0]:
-            doi_url, doi_citation = _doi_citation_cache[doi_arg]
+        # Pre-fetched per-archive citation takes priority (set by the download
+        # pipeline via args.doi_url / args.doi_citation); fall back to fetching
+        # from args.doi for standalone CLI use.
+        doi_url      = getattr(args, "doi_url", "") or ""
+        doi_citation = getattr(args, "doi_citation", "") or ""
+        if not doi_url:
+            doi_arg = getattr(args, "doi", "")
+            if doi_arg and doi_arg not in _doi_citation_cache:
+                print(f"  Fetching APA citation for DOI {doi_arg} …")
+                _doi_citation_cache[doi_arg] = fetch_doi_citation(doi_arg)
+            doi_url, doi_citation = _doi_citation_cache.get(doi_arg, ("", ""))
+        if doi_url:
             ds.source_doi    = doi_url
+        if doi_citation:
             ds.PartOfDataset = doi_citation
+        dobj_citation = getattr(args, "dobj_citation", "") or ""
+        if dobj_citation:
+            ds.citation = dobj_citation
 
         # ── ICOS ETC L2 product metadata ──────────────────────────────────────
         product = finfo.get("product", "").upper()

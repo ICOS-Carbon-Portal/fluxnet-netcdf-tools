@@ -1016,8 +1016,12 @@ def restructure(csv_paths: list[Path], nc_path: Path,
     print(f"Fetching ICOS station metadata for {site_id} …")
     station_meta = fetch_icos_station_meta(site_id)
 
-    doi_url = doi_citation = ""
-    if getattr(args, "doi", None):
+    # Pre-fetched per-archive citation takes priority (set by the download
+    # pipeline via args.doi_url / args.doi_citation); fall back to fetching
+    # from args.doi for standalone CLI use.
+    doi_url      = getattr(args, "doi_url", "") or ""
+    doi_citation = getattr(args, "doi_citation", "") or ""
+    if not doi_url and getattr(args, "doi", None):
         print(f"Fetching APA citation for DOI {args.doi} …")
         doi_url, doi_citation = fetch_doi_citation(args.doi)
 
@@ -1043,7 +1047,11 @@ def restructure(csv_paths: list[Path], nc_path: Path,
             setattr(root_ds, attr_key, attr_val)
         if doi_url:
             root_ds.source_doi    = doi_url
+        if doi_citation:
             root_ds.PartOfDataset = doi_citation
+        dobj_citation = getattr(args, "dobj_citation", "") or ""
+        if dobj_citation:
+            root_ds.citation = dobj_citation
 
         written_by_res: dict[str, set[str]] = {}
 

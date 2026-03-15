@@ -1,7 +1,7 @@
 # ICOS / FLUXNET → CF-1.12 NetCDF4 conversion toolkit
 
 Python scripts to convert ICOS ETC L2 CSV data (FLUXES, FLUXNET, METEO,
-METEOSENS) to CF-1.12–compliant NetCDF4 files.  Station metadata and DOI
+METEOSENS) to CF-1.12–compliant NetCDF4 files.  Station metadata and
 citations are fetched live from the ICOS Carbon Portal.
 
 ## Scripts
@@ -21,7 +21,7 @@ python fluxnet2nc.py ICOSETC_SE-Svb_FLUXES_INTERIM_L2.csv \
 |---|---|---|
 | `csv` | (required) | Input CSV file |
 | `--output FILE` | same dir as input | Output `.nc` path |
-| `--doi DOI` | — | Collection DOI; adds `source_doi` and `PartOfDataset` global attrs |
+| `--doi DOI` | — | Collection DOI; adds `source_doi` and `PartOfDataset` (APA citation) global attrs |
 
 ---
 
@@ -121,8 +121,9 @@ Pipeline steps:
 | `mean_annual_precipitation` | mm, from station page |
 | `documentation` | URL to station documentation |
 | `current_staff` | comma-separated list of station PIs / staff |
-| `source_doi` | e.g. `https://doi.org/10.18160/R3G6-Z8ZH` |
-| `PartOfDataset` | APA citation of the collection DOI |
+| `source_doi` | Canonical DOI / handle URL of the source data object |
+| `PartOfDataset` | APA-style citation fetched from doi.org (populated when `--doi` is given) |
+| `citation` | Pre-formatted citation string from the ICOS CP data object landing page (populated by the download pipeline) |
 | `Conventions` | `CF-1.12` |
 
 ---

@@ -28,7 +28,7 @@ from pathlib import Path
 
 # Import restructure function and helpers from sibling scripts
 sys.path.insert(0, str(Path(__file__).parent))
-from fluxnet2nc import fetch_doi_citation, parse_filename
+from fluxnet2nc import fetch_dobj_citation
 from fluxnet_restructure import restructure
 
 
@@ -148,7 +148,8 @@ def run_restructure(
     site_id: str,
     csv_paths: list[Path],
     outdir: Path,
-    doi: str,
+    doi_url: str,
+    dobj_citation: str,
     comment: str,
 ) -> Path:
     """Call restructure() directly (no subprocess), returning the output .nc path."""
@@ -157,10 +158,13 @@ def run_restructure(
     nc_path = outdir / f"ICOSETC_{site_id}{'_INTERIM' if interim else ''}_restructured.nc"
 
     args = Namespace(
-        site_id  = site_id,
-        output   = nc_path,
-        comment  = comment,
-        doi      = doi,
+        site_id       = site_id,
+        output        = nc_path,
+        comment       = comment,
+        doi           = "",
+        doi_url       = doi_url,
+        doi_citation  = "",
+        dobj_citation = dobj_citation,
     )
     restructure(csv_paths, nc_path, args)
     return nc_path
@@ -279,9 +283,19 @@ def main() -> None:
                 zip_path.unlink(missing_ok=True)
             continue
 
+        # ── Per-archive citation ──────────────────────────────────────────────
+        print(f"  Fetching citation for {arch['res']} …")
+        arch_doi_url, arch_dobj_citation = fetch_dobj_citation(arch["res"])
+        if not arch_doi_url:
+            print(f"  WARNING: no citation found for {arch['res']}; "
+                  "source_doi / citation will be absent from output")
+
         # ── Restructure ───────────────────────────────────────────────────────
         try:
-            nc_path = run_restructure(site_id, csv_paths, outdir, doi, args.comment)
+            nc_path = run_restructure(
+                site_id, csv_paths, outdir,
+                arch_doi_url, arch_dobj_citation, args.comment,
+            )
             print(f"  Output: {nc_path}")
             ok.append(site_id)
         except Exception as exc:
