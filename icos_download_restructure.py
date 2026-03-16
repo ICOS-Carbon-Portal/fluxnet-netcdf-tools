@@ -28,7 +28,7 @@ from pathlib import Path
 
 # Import restructure function and helpers from sibling scripts
 sys.path.insert(0, str(Path(__file__).parent))
-from fluxnet2nc import fetch_dobj_citation
+from fluxnet2nc import fetch_column_instruments, fetch_dobj_citation
 from fluxnet_restructure import restructure
 
 
@@ -44,6 +44,9 @@ _NEEDED_CSV = re.compile(
 
 # Station ID pattern inside ARCHIVE zip filename
 _STATION_RE = re.compile(r"ICOSETC_([^_]+-\w+)_ARCHIVE", re.IGNORECASE)
+
+# Generic station ID pattern (any product member name)
+_STATION_RE_GENERIC = re.compile(r"ICOSETC_([^_]+-[^_]+)_", re.IGNORECASE)
 
 
 # ── ICOS CP collection API ────────────────────────────────────────────────────
@@ -63,10 +66,14 @@ def resolve_collection_url(doi: str) -> str:
     return url
 
 
-def get_archive_members(collection_url: str) -> list[dict]:
-    """Fetch collection members and return only ARCHIVE entries.
+def get_collection_members(
+    collection_url: str,
+) -> tuple[list[dict], dict[str, str]]:
+    """Fetch collection members and return (archives, meteosens_by_site).
 
-    Each entry is a dict with keys: name, res, hash_id.
+    archives:           [{name, res, hash_id}, ...] for ARCHIVE entries only
+    meteosens_by_site:  {"SE-Svb": "https://meta.icos-cp.eu/objects/...", ...}
+                        keyed by site ID extracted from the METEOSENS member name
     """
     req = urllib.request.Request(
         collection_url, headers={"Accept": "application/json"}
@@ -74,13 +81,27 @@ def get_archive_members(collection_url: str) -> list[dict]:
     with urllib.request.urlopen(req, timeout=20) as resp:
         data = json.load(resp)
     members = data.get("members", [])
-    archives = []
+
+    archives: list[dict] = []
+    meteosens_by_site: dict[str, str] = {}
+
     for m in members:
-        if "_ARCHIVE_" not in m.get("name", ""):
-            continue
-        res = m["res"]                        # https://meta.icos-cp.eu/objects/{hash}
-        hash_id = res.rsplit("/", 1)[-1]
-        archives.append({"name": m["name"], "res": res, "hash_id": hash_id})
+        name = m.get("name", "")
+        res  = m["res"]
+        if "_ARCHIVE_" in name:
+            hash_id = res.rsplit("/", 1)[-1]
+            archives.append({"name": name, "res": res, "hash_id": hash_id})
+        elif "_METEOSENS_" in name.upper():
+            sm = _STATION_RE_GENERIC.match(name)
+            if sm:
+                meteosens_by_site[sm.group(1)] = res
+
+    return archives, meteosens_by_site
+
+
+def get_archive_members(collection_url: str) -> list[dict]:
+    """Return only the ARCHIVE entries from the collection (convenience wrapper)."""
+    archives, _ = get_collection_members(collection_url)
     return archives
 
 
@@ -151,20 +172,28 @@ def run_restructure(
     doi_url: str,
     dobj_citation: str,
     comment: str,
+    meteosens_res: str = "",
 ) -> Path:
     """Call restructure() directly (no subprocess), returning the output .nc path."""
     # Determine INTERIM tag from any of the CSV filenames
     interim = any("INTERIM" in p.stem.upper() for p in csv_paths)
     nc_path = outdir / f"ICOSETC_{site_id}{'_INTERIM' if interim else ''}_restructured.nc"
 
+    column_instruments: dict = {}
+    if meteosens_res:
+        print(f"  Fetching instrument deployment metadata …")
+        column_instruments = fetch_column_instruments(meteosens_res)
+        print(f"  {len(column_instruments)} column(s) with instrument info")
+
     args = Namespace(
-        site_id       = site_id,
-        output        = nc_path,
-        comment       = comment,
-        doi           = "",
-        doi_url       = doi_url,
-        doi_citation  = "",
-        dobj_citation = dobj_citation,
+        site_id            = site_id,
+        output             = nc_path,
+        comment            = comment,
+        doi                = "",
+        doi_url            = doi_url,
+        doi_citation       = "",
+        dobj_citation      = dobj_citation,
+        column_instruments = column_instruments,
     )
     restructure(csv_paths, nc_path, args)
     return nc_path
@@ -220,8 +249,9 @@ def main() -> None:
         sys.exit(f"ERROR: could not resolve DOI: {exc}")
     print(f"Collection: {collection_url}")
 
-    archives = get_archive_members(collection_url)
-    print(f"Found {len(archives)} ARCHIVE file(s) in collection")
+    archives, meteosens_by_site = get_collection_members(collection_url)
+    print(f"Found {len(archives)} ARCHIVE file(s) in collection"
+          f"  ({len(meteosens_by_site)} with METEOSENS instrument metadata)")
 
     if station_filter:
         archives = [
@@ -291,10 +321,12 @@ def main() -> None:
                   "source_doi / citation will be absent from output")
 
         # ── Restructure ───────────────────────────────────────────────────────
+        meteosens_res = meteosens_by_site.get(site_id, "")
         try:
             nc_path = run_restructure(
                 site_id, csv_paths, outdir,
                 arch_doi_url, arch_dobj_citation, args.comment,
+                meteosens_res=meteosens_res,
             )
             print(f"  Output: {nc_path}")
             ok.append(site_id)

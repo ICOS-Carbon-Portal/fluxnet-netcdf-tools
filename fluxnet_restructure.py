@@ -37,6 +37,7 @@ Dependencies:
 """
 
 import argparse
+import json
 import re
 import sys
 from datetime import datetime, timezone
@@ -63,6 +64,7 @@ from fluxnet2nc import (
     _product_priority,
     _read_csv,
     _to_cf_time,
+    fetch_column_instruments,
     fetch_doi_citation,
     fetch_icos_station_meta,
     parse_filename,
@@ -514,7 +516,8 @@ def _write_energy_corr(grp: nc.Dataset, df: pd.DataFrame,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _write_profile_vars(grp: nc.Dataset, df: pd.DataFrame,
-                        cols: list[str]) -> None:
+                        cols: list[str],
+                        column_instruments: dict | None = None) -> None:
     """
     Collapse FLUXNET BADM triple-index variables VARBASE_R_H_V[_N|_SE|_QC]
     into VARBASE(time, pos, height, vrep).
@@ -589,6 +592,18 @@ def _write_profile_vars(grp: nc.Dataset, df: pd.DataFrame,
 
         _nc_var(grp, nc_name, "f4", dims, _FV_F32, ln, u,
                 coordinates=coords)[:] = val
+
+        if column_instruments:
+            all_deps = []
+            for col, r, h, v, stat in entries:
+                if stat is not None:
+                    continue
+                for dep in column_instruments.get(col, []):
+                    all_deps.append({"r": r, "h": h, "v": v, **dep})
+            if all_deps:
+                grp[nc_name].instrument_deployments = json.dumps(
+                    all_deps, separators=(",", ":")
+                )
 
         if has_n:
             cnt_dtype, cnt_fv, cnt_arr = _promote_count_arr(cnt, _FV_F32)
@@ -717,7 +732,8 @@ def _write_single_idx_vars(grp: nc.Dataset, df: pd.DataFrame,
 # Top-level multi-dim dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _write_multidim(grp: nc.Dataset, df: pd.DataFrame) -> set[str]:
+def _write_multidim(grp: nc.Dataset, df: pd.DataFrame,
+                    column_instruments: dict | None = None) -> set[str]:
     """
     Detect multi-dimensional FLUXNET variable families in *df*, write them
     to *grp*, and return the set of source column names that were consumed.
@@ -774,7 +790,7 @@ def _write_multidim(grp: nc.Dataset, df: pd.DataFrame) -> set[str]:
     remaining = [c for c in data_cols if c not in consumed]
     profile_cols = [c for c in remaining if _PROFILE_RE.match(c)]
     if profile_cols:
-        _write_profile_vars(grp, df, profile_cols)
+        _write_profile_vars(grp, df, profile_cols, column_instruments)
         consumed.update(profile_cols)
 
     # --- Single-index gradients / replicates (FLUXES/METEO: VARBASE_IDX[…]) --
@@ -886,15 +902,16 @@ def _write_1d_vars(grp: nc.Dataset, df: pd.DataFrame,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _write_group(
-    root_ds:     nc.Dataset,
-    grp_name:    str,
-    df:          pd.DataFrame,
-    ts_start:    pd.DatetimeIndex,
-    ts_end:      pd.DatetimeIndex | None,
-    freq_code:   str,
-    source_file: str,
-    skip_vars:   set[str],
-    grp:         nc.Dataset | None = None,
+    root_ds:            nc.Dataset,
+    grp_name:           str,
+    df:                 pd.DataFrame,
+    ts_start:           pd.DatetimeIndex,
+    ts_end:             pd.DatetimeIndex | None,
+    freq_code:          str,
+    source_file:        str,
+    skip_vars:          set[str],
+    grp:                nc.Dataset | None = None,
+    column_instruments: dict | None = None,
 ) -> set[str]:
     """
     Write one temporal group.  Returns the set of source column names written
@@ -942,7 +959,7 @@ def _write_group(
     # Work only on columns not already written by a higher-priority product
     available_df = df[[c for c in df.columns
                         if c in _TS_COLS or c not in skip_vars]]
-    consumed = _write_multidim(grp, available_df)
+    consumed = _write_multidim(grp, available_df, column_instruments)
 
     # ── 1-D fallback for remaining columns ────────────────────────────────────
     written_1d = _write_1d_vars(grp, available_df, skip=consumed)
@@ -1053,6 +1070,8 @@ def restructure(csv_paths: list[Path], nc_path: Path,
         if dobj_citation:
             root_ds.citation = dobj_citation
 
+        column_instruments: dict = getattr(args, "column_instruments", {}) or {}
+
         written_by_res: dict[str, set[str]] = {}
 
         # ── Half-hourly: merge all HH products, write to root ─────────────────
@@ -1109,6 +1128,7 @@ def restructure(csv_paths: list[Path], nc_path: Path,
                 root_ds, "hh_merged", merged, ts_start, ts_end,
                 hh_freq_code, ", ".join(source_names), set(),
                 grp=root_ds,
+                column_instruments=column_instruments,
             )
             written_by_res[hh_freq_code] = written
 
@@ -1138,6 +1158,7 @@ def restructure(csv_paths: list[Path], nc_path: Path,
             written = _write_group(
                 root_ds, grp_name, df, ts_start, ts_end,
                 freq_code, csv_path.name, skip_vars,
+                column_instruments=column_instruments,
             )
             written_by_res.setdefault(freq_code, set()).update(written)
 

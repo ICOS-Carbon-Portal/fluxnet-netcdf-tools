@@ -66,6 +66,42 @@ python icos_combined.py ICOSETC_*_FLUXES_*_L2.csv \
 
 ---
 
+### `patch_citation.py` — backfill `citation` into existing files
+
+Adds the `citation` global attribute to existing `.nc` files without
+reprocessing — one HTTP request per station.
+
+```
+python patch_citation.py 10.18160/R3G6-Z8ZH
+python patch_citation.py 10.18160/R3G6-Z8ZH --ncdir /data/icos_l2
+python patch_citation.py 10.18160/R3G6-Z8ZH --overwrite
+```
+
+---
+
+### `patch_instruments.py` — backfill `instrument_deployments` into existing files
+
+Fetches METEOSENS instrument deployment metadata from the ICOS CP landing
+page for each station and writes it as a per-variable `instrument_deployments`
+attribute (JSON string) to the 4-D METEOSENS variables in existing `.nc` files.
+
+```
+python patch_instruments.py 10.18160/R3G6-Z8ZH
+python patch_instruments.py 10.18160/R3G6-Z8ZH --ncdir /data/icos_l2
+python patch_instruments.py 10.18160/R3G6-Z8ZH --station SE-Svb
+python patch_instruments.py 10.18160/R3G6-Z8ZH --overwrite
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `doi` | (required) | Collection DOI |
+| `--ncdir DIR` | `.` | Directory containing `.nc` files |
+| `--pattern GLOB` | `*_restructured.nc` | Filename pattern |
+| `--station ID ...` | all | Limit to specific station IDs |
+| `--overwrite` | off | Replace attribute if already present |
+
+---
+
 ### `icos_download_restructure.py` — full pipeline from DOI
 
 Resolves an ICOS collection DOI, downloads the ARCHIVE zip for each
@@ -125,6 +161,31 @@ Pipeline steps:
 | `PartOfDataset` | APA-style citation fetched from doi.org (populated when `--doi` is given) |
 | `citation` | Pre-formatted citation string from the ICOS CP data object landing page (populated by the download pipeline) |
 | `Conventions` | `CF-1.12` |
+
+## Variable attribute: `instrument_deployments` (METEOSENS only)
+
+Each 4-D METEOSENS variable (e.g. `TA`, `LW_IN`, `SWC`) carries an
+`instrument_deployments` attribute — a compact JSON array describing which
+physical instruments measured that variable, their exact deployment location,
+and the active deployment period.
+
+```json
+[
+  {"r": 1, "h": 1, "v": 1,
+   "instrument": "TA-HMP155 (2483)",
+   "instrument_uri": "http://meta.icos-cp.eu/resources/instruments/ETC_…",
+   "instrument_description": "Relative humidity and temperature probe, Vaisala, HMP155",
+   "lat": 56.097, "lon": 13.419, "alt": 28.0,
+   "start": "2018-01-01T00:00:00Z", "stop": "2022-06-15T12:00:00Z"},
+  {"r": 1, "h": 1, "v": 1,
+   "instrument": "TA-HMP155 (3101)", …, "start": "2022-06-15T12:00:00Z", "stop": null}
+]
+```
+
+- `r / h / v` — indices into the `(pos_r, height_h, vrep_v)` dimensions of the variable
+- `stop: null` — deployment is ongoing
+- Sourced from the ICOS CP METEOSENS data object landing page via content negotiation
+- Use `patch_instruments.py` to backfill existing files
 
 ---
 

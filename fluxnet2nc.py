@@ -33,6 +33,7 @@ FILL_VALUE_OUT = np.float32(9.96921e+36)   # standard NetCDF _FillValue
 _station_meta_cache: dict[str, dict] = {}
 _doi_citation_cache: dict[str, tuple[str, str]] = {}
 _dobj_citation_cache: dict[str, tuple[str, str]] = {}
+_column_instruments_cache: dict[str, dict[str, list[dict]]] = {}
 
 # ── Variable metadata: root name → (CF standard_name | None, long_name, units)
 VAR_META: dict[str, tuple] = {
@@ -493,6 +494,67 @@ def fetch_dobj_citation(res_url: str) -> tuple[str, str]:
     pid_url  = f"https://hdl.handle.net/{pid}" if pid else ""
     result   = (pid_url, citation)
     _dobj_citation_cache[res_url] = result
+    return result
+
+
+def fetch_column_instruments(res_url: str) -> dict[str, list[dict]]:
+    """Return a column-label → instrument-deployment-list mapping for a METEOSENS object.
+
+    Fetches the data object JSON from *res_url* and inspects
+    ``specificInfo.columns``.  Only columns that carry at least one
+    ``instrumentDeployments`` entry are included in the result.
+
+    Each deployment record contains:
+      instrument             – human-readable label (model + serial)
+      instrument_uri         – ICOS CP instrument URI
+      instrument_description – first comment string from the instrument record
+      lat, lon, alt          – deployment position
+      start                  – ISO-8601 UTC deployment start
+      stop                   – ISO-8601 UTC deployment end, or None if ongoing
+
+    Returns an empty dict on any error or if the object has no deployment info.
+    """
+    import json
+    import urllib.request
+
+    if res_url in _column_instruments_cache:
+        return _column_instruments_cache[res_url]
+
+    try:
+        req = urllib.request.Request(
+            res_url, headers={"Accept": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.load(resp)
+    except Exception as exc:
+        print(
+            f"  WARNING: could not fetch column instrument metadata from {res_url}: {exc}",
+            file=sys.stderr,
+        )
+        _column_instruments_cache[res_url] = {}
+        return {}
+
+    columns = data.get("specificInfo", {}).get("columns", [])
+    result: dict[str, list[dict]] = {}
+    for col in columns:
+        deployments = col.get("instrumentDeployments", [])
+        if not deployments:
+            continue
+        col_label = col["label"]
+        result[col_label] = [
+            {
+                "instrument":             d["instrument"]["label"],
+                "instrument_uri":         d["instrument"]["uri"],
+                "instrument_description": (d["instrument"].get("comments") or [""])[0],
+                "lat":   d["pos"]["lat"],
+                "lon":   d["pos"]["lon"],
+                "alt":   d["pos"]["alt"],
+                "start": d["start"],
+                "stop":  d.get("stop"),
+            }
+            for d in deployments
+        ]
+    _column_instruments_cache[res_url] = result
     return result
 
 
