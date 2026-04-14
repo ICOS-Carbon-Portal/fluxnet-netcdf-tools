@@ -549,7 +549,7 @@ def fetch_column_instruments(res_url: str) -> dict[str, list[dict]]:
                 "lat":   d["pos"]["lat"],
                 "lon":   d["pos"]["lon"],
                 "alt":   d["pos"]["alt"],
-                "start": d["start"],
+                "start": d.get("start"),
                 "stop":  d.get("stop"),
             }
             for d in deployments

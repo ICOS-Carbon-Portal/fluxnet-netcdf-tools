@@ -2,6 +2,8 @@
 *.nc
 *.csv
 *.zip
+*.zarr/
+CODE_REVIEW.md
 
 # Python virtual environment
 .venv/

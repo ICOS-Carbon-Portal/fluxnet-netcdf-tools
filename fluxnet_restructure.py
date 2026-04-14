@@ -1165,6 +1165,806 @@ def restructure(csv_paths: list[Path], nc_path: Path,
     print(f"Done.    {nc_path}")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Zarr / xarray dataset builders  (no netCDF4 dependency)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _col_to_f32_xr(series: pd.Series) -> np.ndarray:
+    """Like _col_to_f32 but uses NaN for missing values (for xarray path)."""
+    arr  = series.to_numpy(dtype=np.float64, na_value=np.nan)
+    mask = np.isnan(arr) | (arr == float(FILL_VALUE_IN))
+    return np.where(mask, np.nan, arr).astype(np.float32)
+
+
+def _col_to_qc_xr(series: pd.Series) -> np.ndarray:
+    """Like _col_to_qc_u8 but keeps 255 for missing (zarr path)."""
+    arr  = series.to_numpy(dtype=np.float64, na_value=np.nan)
+    mask = np.isnan(arr) | (arr == float(FILL_VALUE_IN))
+    safe = np.where(mask, 0.0, arr)
+    return np.where(mask, _FV_U8,
+                    np.clip(np.round(safe), 0, 3).astype(np.uint8))
+
+
+def _free_zarr_name(used: set[str], base: str) -> str:
+    """Return *base* if not in *used*, else try _obs, _obs2, _obs3, _raw."""
+    if base not in used:
+        return base
+    for suffix in ("_obs", "_obs2", "_obs3", "_raw"):
+        name = base + suffix
+        if name not in used:
+            return name
+    raise RuntimeError(f"Cannot find free zarr name for {base!r}")
+
+
+def _build_nee_dataset(df: pd.DataFrame, ts_start: pd.DatetimeIndex):
+    """NEE(time, ustar_threshold, nee_variant) + associated arrays → xr.Dataset."""
+    import xarray as xr
+
+    n_t      = len(df)
+    shape    = (n_t, len(USTAR_LABELS), len(NEE_VARIANT_LABELS))
+    consumed: set[str] = set()
+
+    val      = np.full(shape, np.nan,  dtype=np.float32)
+    qc       = np.full(shape, _FV_U8,  dtype=np.uint8)
+    runc     = np.full(shape, np.nan,  dtype=np.float32)
+    junc     = np.full(shape, np.nan,  dtype=np.float32)
+    day_runc = np.full(shape, np.nan,  dtype=np.float32)
+    ngt_runc = np.full(shape, np.nan,  dtype=np.float32)
+    has_day = has_ngt = False
+
+    for col in df.columns:
+        if col in _TS_COLS:
+            continue
+        m = _NEE_RE.match(col)
+        if not m:
+            continue
+        ustar, variant, stat = m.groups()
+        if stat in ("RANDUNC_METHOD", "RANDUNC_N"):
+            continue
+        ui = _USTAR_IDX[ustar]
+        vi = _VARIANT_IDX[variant]
+        consumed.add(col)
+        if   stat is None:            val[:, ui, vi]      = _col_to_f32_xr(df[col])
+        elif stat == "QC":            qc[:, ui, vi]       = _col_to_qc_xr(df[col])
+        elif stat == "RANDUNC":       runc[:, ui, vi]     = _col_to_f32_xr(df[col])
+        elif stat == "JOINTUNC":      junc[:, ui, vi]     = _col_to_f32_xr(df[col])
+        elif stat == "DAY_RANDUNC":   day_runc[:, ui, vi] = _col_to_f32_xr(df[col]); has_day = True
+        elif stat == "NIGHT_RANDUNC": ngt_runc[:, ui, vi] = _col_to_f32_xr(df[col]); has_ngt = True
+
+    if not consumed:
+        return xr.Dataset(), consumed
+
+    u    = _get_units("NEE") or "umolCO2 m-2 s-1"
+    dims = ["time", "ustar_threshold", "nee_variant"]
+    coords = {
+        "ustar_threshold": xr.DataArray(USTAR_LABELS,      dims=["ustar_threshold"],
+                                        attrs={"long_name": "USTAR threshold method"}),
+        "nee_variant":     xr.DataArray(NEE_VARIANT_LABELS, dims=["nee_variant"],
+                                        attrs={"long_name": "NEE ensemble variant"}),
+    }
+    dv = {
+        "NEE":         xr.DataArray(val,  dims=dims, attrs={
+            "long_name": "Net Ecosystem Exchange", "units": u,
+            "coordinates": "ustar_threshold nee_variant",
+            "comment": ("ustar_threshold: CUT = constant, VUT = variable. "
+                        "nee_variant: REF is most representative."),
+        }),
+        "NEE_QC":      xr.DataArray(qc,   dims=dims, attrs={
+            "long_name": "NEE gap-fill quality flag", "units": "1",
+            "coordinates": "ustar_threshold nee_variant",
+            "comment": "255 = missing or not applicable",
+            **_QC_FLAG_ATTRS,
+        }),
+        "NEE_RANDUNC": xr.DataArray(runc, dims=dims, attrs={
+            "long_name": "NEE random uncertainty", "units": u,
+            "coordinates": "ustar_threshold nee_variant",
+        }),
+        "NEE_JOINTUNC": xr.DataArray(junc, dims=dims, attrs={
+            "long_name": "NEE joint uncertainty", "units": u,
+            "coordinates": "ustar_threshold nee_variant",
+        }),
+    }
+    if has_day:
+        dv["NEE_DAY_RANDUNC"]   = xr.DataArray(day_runc, dims=dims, attrs={
+            "long_name": "NEE daytime random uncertainty", "units": u,
+            "coordinates": "ustar_threshold nee_variant",
+        })
+    if has_ngt:
+        dv["NEE_NIGHT_RANDUNC"] = xr.DataArray(ngt_runc, dims=dims, attrs={
+            "long_name": "NEE nighttime random uncertainty", "units": u,
+            "coordinates": "ustar_threshold nee_variant",
+        })
+    return xr.Dataset(dv, coords=coords), consumed
+
+
+def _build_gppeco_dataset(df: pd.DataFrame, ts_start: pd.DatetimeIndex, base: str):
+    """GPP or RECO(time, partition_method, ustar_threshold, nee_variant) → xr.Dataset."""
+    import xarray as xr
+
+    n_t      = len(df)
+    shape    = (n_t, len(PARTITION_LABELS), len(USTAR_LABELS), len(NEE_VARIANT_LABELS))
+    consumed: set[str] = set()
+
+    val = np.full(shape, np.nan, dtype=np.float32)
+    qc  = np.full(shape, _FV_U8, dtype=np.uint8)
+
+    for col in df.columns:
+        if col in _TS_COLS:
+            continue
+        m = _GPPECO_RE.match(col)
+        if not m or m.group(1) != base:
+            continue
+        _, part, ustar, variant, stat = m.groups()
+        pi = _PART_IDX[part]
+        ui = _USTAR_IDX[ustar]
+        vi = _VARIANT_IDX[variant]
+        consumed.add(col)
+        if   stat is None: val[:, pi, ui, vi] = _col_to_f32_xr(df[col])
+        elif stat == "QC": qc[:, pi, ui, vi]  = _col_to_qc_xr(df[col])
+
+    if not consumed:
+        return xr.Dataset(), consumed
+
+    desc = {"GPP": "Gross Primary Production", "RECO": "Ecosystem Respiration"}
+    u    = _get_units(base) or "umolCO2 m-2 s-1"
+    dims = ["time", "partition_method", "ustar_threshold", "nee_variant"]
+    coords = {
+        "partition_method": xr.DataArray(PARTITION_LABELS,  dims=["partition_method"],
+                                         attrs={"long_name": "CO2 flux partitioning method"}),
+        "ustar_threshold":  xr.DataArray(USTAR_LABELS,      dims=["ustar_threshold"],
+                                         attrs={"long_name": "USTAR threshold method"}),
+        "nee_variant":      xr.DataArray(NEE_VARIANT_LABELS, dims=["nee_variant"],
+                                         attrs={"long_name": "NEE ensemble variant"}),
+    }
+    dv = {
+        base: xr.DataArray(val, dims=dims, attrs={
+            "long_name": desc[base], "units": u,
+            "coordinates": "partition_method ustar_threshold nee_variant",
+            "comment": ("NT: nighttime method (Reichstein 2005); "
+                        "DT: daytime method (Lasslop 2010)."),
+        }),
+        f"{base}_QC": xr.DataArray(qc, dims=dims, attrs={
+            "long_name": f"{desc[base]} gap-fill quality flag", "units": "1",
+            "comment": "255 = missing or not applicable",
+            **_QC_FLAG_ATTRS,
+        }),
+    }
+    return xr.Dataset(dv, coords=coords), consumed
+
+
+def _build_soil_dataset(df: pd.DataFrame, ts_start: pd.DatetimeIndex):
+    """TS and SWC(time, soil_layer) → xr.Dataset."""
+    import xarray as xr
+
+    consumed: set[str] = set()
+    ts_cols  = [c for c in df.columns if (m := _SOIL_RE.match(c)) and m.group(1) == "TS"]
+    swc_cols = [c for c in df.columns if (m := _SOIL_RE.match(c)) and m.group(1) == "SWC"]
+    all_cols = ts_cols + swc_cols
+    if not all_cols:
+        return xr.Dataset(), consumed
+
+    layer_indices = sorted({
+        int(m.group(2))
+        for c in all_cols
+        if (m := _SOIL_RE.match(c))
+    })
+    n_layers = max(layer_indices)
+    n_t      = len(df)
+    shape    = (n_t, n_layers)
+    dims     = ["time", "soil_layer"]
+
+    coords = {
+        "soil_layer": xr.DataArray(
+            np.arange(1, n_layers + 1, dtype=np.int16), dims=["soil_layer"],
+            attrs={"long_name": "soil layer index (1 = shallowest)", "units": "1",
+                   "comment": "Layer depths in site BADM metadata (VAR_INFO_HEIGHT)."},
+        ),
+    }
+    desc  = {"TS": "Soil temperature (MDS gap-filled)", "SWC": "Soil water content (MDS gap-filled)"}
+    units = {"TS": "degC", "SWC": "%"}
+    dv: dict = {}
+
+    for base, cols in (("TS", ts_cols), ("SWC", swc_cols)):
+        if not cols:
+            continue
+        val = np.full(shape, np.nan, dtype=np.float32)
+        qc  = np.full(shape, _FV_U8, dtype=np.uint8)
+        for col in cols:
+            m = _SOIL_RE.match(col)
+            if not m:
+                continue
+            li = int(m.group(2)) - 1
+            if   m.group(3) is None: val[:, li] = _col_to_f32_xr(df[col])
+            elif m.group(3) == "QC": qc[:, li]  = _col_to_qc_xr(df[col])
+        consumed.update(cols)
+        dv[base]          = xr.DataArray(val, dims=dims, attrs={
+            "long_name": desc[base], "units": units[base], "coordinates": "soil_layer",
+        })
+        dv[f"{base}_QC"]  = xr.DataArray(qc,  dims=dims, attrs={
+            "long_name": f"{desc[base]} gap-fill quality flag", "units": "1",
+            "coordinates": "soil_layer", "comment": "255 = missing",
+            **_QC_FLAG_ATTRS,
+        })
+    return xr.Dataset(dv, coords=coords), consumed
+
+
+def _build_energy_corr_dataset(df: pd.DataFrame, ts_start: pd.DatetimeIndex, base: str):
+    """LE_CORR or H_CORR(time, corr_pct) → xr.Dataset."""
+    import xarray as xr
+
+    consumed: set[str] = set()
+    n_t      = len(df)
+    shape    = (n_t, len(CORR_PCT_LABELS))
+    arr      = np.full(shape, np.nan, dtype=np.float32)
+
+    for col in df.columns:
+        if col in _TS_COLS:
+            continue
+        m = _ENERGY_CORR_RE.match(col)
+        if not m or m.group(1) != base:
+            continue
+        arr[:, _CORRPCT_IDX[m.group(2)]] = _col_to_f32_xr(df[col])
+        consumed.add(col)
+
+    if not consumed:
+        return xr.Dataset(), consumed
+
+    desc = {"LE": "Latent heat flux", "H": "Sensible heat flux"}
+    coords = {
+        "corr_pct": xr.DataArray(CORR_PCT_LABELS, dims=["corr_pct"],
+                                  attrs={"long_name": "EBC correction factor percentile"}),
+    }
+    dv = {
+        f"{base}_CORR": xr.DataArray(arr, dims=["time", "corr_pct"], attrs={
+            "long_name": f"{desc[base]} (energy balance corrected)", "units": "W m-2",
+            "coordinates": "corr_pct",
+            "comment": ("p50 (median) is recommended; p25/p75 bound the correction uncertainty."),
+        }),
+    }
+    return xr.Dataset(dv, coords=coords), consumed
+
+
+def _build_profile_dataset(df: pd.DataFrame, ts_start: pd.DatetimeIndex,
+                            used_names: set[str],
+                            column_instruments: dict | None = None):
+    """BADM triple-index VARBASE_R_H_V → VARBASE(time, r, h, v) xr.Dataset."""
+    import xarray as xr
+
+    consumed: set[str] = set()
+    dv:     dict = {}
+    coords: dict = {}
+
+    groups: dict[str, list] = {}
+    for col in df.columns:
+        if col in _TS_COLS:
+            continue
+        m = _PROFILE_RE.match(col)
+        if not m:
+            continue
+        base = m.group(1)
+        r, h, v = int(m.group(2)), int(m.group(3)), int(m.group(4))
+        stat = m.group(5)
+        groups.setdefault(base, []).append((col, r, h, v, stat))
+
+    for base, entries in groups.items():
+        max_r = max(e[1] for e in entries)
+        max_h = max(e[2] for e in entries)
+        max_v = max(e[3] for e in entries)
+
+        nc_name = _free_zarr_name(used_names, base)
+        used_names.add(nc_name)
+        consumed.update(col for col, *_ in entries)
+
+        dim_r, dim_h, dim_v = f"{nc_name}_r", f"{nc_name}_h", f"{nc_name}_v"
+        coords[dim_r] = xr.DataArray(np.arange(1, max_r + 1, dtype=np.int16), dims=[dim_r],
+                                     attrs={"long_name": f"{base} horizontal position index", "units": "1"})
+        coords[dim_h] = xr.DataArray(np.arange(1, max_h + 1, dtype=np.int16), dims=[dim_h],
+                                     attrs={"long_name": f"{base} height/depth index", "units": "1"})
+        coords[dim_v] = xr.DataArray(np.arange(1, max_v + 1, dtype=np.int16), dims=[dim_v],
+                                     attrs={"long_name": f"{base} vertical replicate index", "units": "1"})
+
+        n_t   = len(df)
+        shape = (n_t, max_r, max_h, max_v)
+        vdims = ["time", dim_r, dim_h, dim_v]
+
+        val = np.full(shape, np.nan,  dtype=np.float32)
+        cnt = np.full(shape, np.nan,  dtype=np.float32)
+        se  = np.full(shape, np.nan,  dtype=np.float32)
+        qc  = np.full(shape, _FV_U8,  dtype=np.uint8)
+        has_n = has_se = has_qc = False
+
+        for col, r, h, v, stat in entries:
+            ri, hi, vi = r - 1, h - 1, v - 1
+            if   stat is None: val[:, ri, hi, vi] = _col_to_f32_xr(df[col])
+            elif stat == "N":  cnt[:, ri, hi, vi] = _col_to_f32_xr(df[col]); has_n  = True
+            elif stat == "SE": se[:, ri, hi, vi]  = _col_to_f32_xr(df[col]); has_se = True
+            elif stat == "QC": qc[:, ri, hi, vi]  = _col_to_qc_xr(df[col]);  has_qc = True
+
+        u  = _get_units(base) or "1"
+        ln = _build_long_name(base)
+        if nc_name != base:
+            ln += " (observed multi-replicate)"
+        coord_str = f"{dim_r} {dim_h} {dim_v}"
+
+        var_attrs: dict = {"long_name": ln, "units": u, "coordinates": coord_str}
+        if column_instruments:
+            all_deps = []
+            for col, r, h, v, stat in entries:
+                if stat is not None:
+                    continue
+                for dep in (column_instruments.get(col) or []):
+                    all_deps.append({"r": r, "h": h, "v": v, **dep})
+            if all_deps:
+                var_attrs["instrument_deployments"] = json.dumps(all_deps, separators=(",", ":"))
+
+        dv[nc_name] = xr.DataArray(val, dims=vdims, attrs=var_attrs)
+
+        if has_n:
+            cnt_f32 = np.where(np.isnan(cnt), _FV_F32, cnt.astype(np.float32))
+            cnt_dtype, cnt_fv, cnt_arr = _promote_count_arr(cnt_f32, _FV_F32)
+            dv[f"{nc_name}_N"] = xr.DataArray(cnt_arr, dims=vdims, attrs={
+                "long_name": f"{ln} sample count", "units": "1", "coordinates": coord_str,
+            })
+        if has_se:
+            dv[f"{nc_name}_SE"] = xr.DataArray(se, dims=vdims, attrs={
+                "long_name": f"{ln} standard error", "units": u, "coordinates": coord_str,
+            })
+        if has_qc:
+            dv[f"{nc_name}_QC"] = xr.DataArray(qc, dims=vdims, attrs={
+                "long_name": f"{ln} quality flag", "units": "1", "coordinates": coord_str,
+                **_QC_FLAG_ATTRS,
+            })
+
+    return xr.Dataset(dv, coords=coords), consumed
+
+
+def _build_single_idx_dataset(df: pd.DataFrame, ts_start: pd.DatetimeIndex,
+                               used_names: set[str]):
+    """Single-integer-suffix VARBASE_IDX → VARBASE(time, level) xr.Dataset."""
+    import xarray as xr
+
+    consumed: set[str] = set()
+    not_collapsed: list[str] = []
+    dv:     dict = {}
+    coords: dict = {}
+
+    groups: dict[str, list] = {}
+    for col in df.columns:
+        if col in _TS_COLS:
+            continue
+        m = _SINGLE_IDX_RE.match(col)
+        if not m:
+            continue
+        base = m.group(1)
+        idx  = int(m.group(2))
+        stat = m.group(3)
+        groups.setdefault(base, []).append((col, idx, stat))
+
+    for base, entries in groups.items():
+        levels_with_val  = {idx for _, idx, st in entries if st is None}
+        levels_with_stat = {idx for _, idx, st in entries if st is not None}
+        distinct_levels  = levels_with_val | levels_with_stat
+
+        if len(distinct_levels) < 2 and not (levels_with_val & levels_with_stat):
+            not_collapsed.extend(col for col, _, _ in entries)
+            continue
+
+        sorted_levels = sorted(distinct_levels)
+        level_to_i    = {lvl: i for i, lvl in enumerate(sorted_levels)}
+        n_levels      = len(sorted_levels)
+
+        nc_name  = _free_zarr_name(used_names, base)
+        used_names.add(nc_name)
+        consumed.update(col for col, _, _ in entries)
+
+        dim_name = f"{nc_name}_level"
+        coords[dim_name] = xr.DataArray(
+            np.array(sorted_levels, dtype=np.int32), dims=[dim_name],
+            attrs={"long_name": f"{base} level index", "units": "1"},
+        )
+
+        n_t   = len(df)
+        shape = (n_t, n_levels)
+        vdims = ["time", dim_name]
+
+        val = np.full(shape, np.nan,  dtype=np.float32)
+        cnt = np.full(shape, np.nan,  dtype=np.float32)
+        se  = np.full(shape, np.nan,  dtype=np.float32)
+        qc  = np.full(shape, _FV_U8,  dtype=np.uint8)
+        has_n = has_se = has_qc = False
+        se_label = "SE"
+
+        for col, idx, stat in entries:
+            li = level_to_i[idx]
+            if   stat is None:         val[:, li] = _col_to_f32_xr(df[col])
+            elif stat == "N":          cnt[:, li] = _col_to_f32_xr(df[col]); has_n  = True
+            elif stat in ("SE", "SD"): se[:, li]  = _col_to_f32_xr(df[col]); has_se = True; se_label = stat
+            elif stat == "QC":         qc[:, li]  = _col_to_qc_xr(df[col]);  has_qc = True
+
+        u  = _get_units(base) or "1"
+        ln = _build_long_name(base)
+        if nc_name != base:
+            ln += " (observed)"
+
+        dv[nc_name] = xr.DataArray(val, dims=vdims, attrs={
+            "long_name": ln, "units": u, "coordinates": dim_name,
+        })
+        if has_n:
+            cnt_f32 = np.where(np.isnan(cnt), _FV_F32, cnt.astype(np.float32))
+            cnt_dtype, cnt_fv, cnt_arr = _promote_count_arr(cnt_f32, _FV_F32)
+            dv[f"{nc_name}_N"] = xr.DataArray(cnt_arr, dims=vdims, attrs={
+                "long_name": f"{ln} sample count", "units": "1", "coordinates": dim_name,
+            })
+        if has_se:
+            dv[f"{nc_name}_{se_label}"] = xr.DataArray(se, dims=vdims, attrs={
+                "long_name": f"{ln} standard {'deviation' if se_label == 'SD' else 'error'}",
+                "units": u, "coordinates": dim_name,
+            })
+        if has_qc:
+            dv[f"{nc_name}_QC"] = xr.DataArray(qc, dims=vdims, attrs={
+                "long_name": f"{ln} quality flag", "units": "1", "coordinates": dim_name,
+                **_QC_FLAG_ATTRS,
+            })
+
+    return xr.Dataset(dv, coords=coords), consumed, not_collapsed
+
+
+def _build_1d_dataset(df: pd.DataFrame, ts_start: pd.DatetimeIndex,
+                       ts_end: pd.DatetimeIndex | None, freq_code: str,
+                       skip: set[str], used_names: set[str]) -> "xr.Dataset":
+    """Build 1-D (time,) xarray Dataset for all columns not in *skip*."""
+    import xarray as xr
+
+    # ── Time coordinate ───────────────────────────────────────────────────────
+    time_attrs: dict = {
+        "standard_name": "time",
+        "long_name":     "time at start of averaging period",
+        "axis":          "T",
+    }
+    if ts_end is not None:
+        time_attrs["bounds"] = "time_bounds"
+
+    coords: dict = {"time": xr.DataArray(ts_start, dims=["time"], attrs=time_attrs)}
+    dv:     dict = {}
+
+    if ts_end is not None:
+        tb = np.stack([ts_start.values, ts_end.values], axis=1)  # (n, 2) datetime64
+        dv["time_bounds"] = xr.DataArray(tb, dims=["time", "nv"])
+
+    dv["temporal_resolution"] = xr.DataArray(
+        _FREQ_ISO.get(freq_code, "unknown"),
+        attrs={"long_name": "ISO 8601 duration of each time step"},
+    )
+
+    skipped: list[str] = []
+    for col in df.columns:
+        if col in _TS_COLS or col in skip:
+            continue
+
+        is_qc = col.endswith("_QC") or col.endswith("_FLAG")
+        raw   = df[col].values
+        mask  = np.asarray(pd.isna(df[col]))
+
+        if is_qc:
+            safe = np.where(mask, 0.0, np.asarray(raw, dtype=np.float64))
+            if np.any(safe != np.floor(safe)):
+                arr = np.where(mask, np.nan, safe).astype(np.float32)
+                dtype = "f4"
+            else:
+                vmax = int(safe.max()) if safe.size else 0
+                if vmax <= 254:
+                    arr = np.where(mask, _FV_U8, safe.astype(np.uint8))
+                    dtype = "u1"
+                elif vmax <= 2_147_483_647:
+                    arr = np.where(mask, np.int32(-1), safe.astype(np.int32))
+                    dtype = "i4"
+                else:
+                    arr = np.where(mask, np.int64(-1), safe.astype(np.int64))
+                    dtype = "i8"
+        else:
+            try:
+                f64 = np.asarray(raw, dtype=np.float64)
+            except (ValueError, TypeError):
+                skipped.append(col)
+                continue
+            safe   = np.where(mask, 0.0, f64)
+            result = _choose_int_dtype(f64[~mask])
+            if result is not None:
+                nc_dtype, fv_int = result
+                arr   = np.where(mask, fv_int, safe.astype(np.dtype(nc_dtype)))
+                dtype = nc_dtype
+            else:
+                arr   = np.where(mask, np.nan, f64).astype(np.float32)
+                dtype = "f4"
+
+        nc_name = col
+        if nc_name in used_names:
+            nc_name = col + "_raw"
+            print(f"    Renaming {col!r} → {nc_name!r} (name taken by multi-dim variable)")
+        used_names.add(nc_name)
+
+        var_attrs: dict = {"long_name": _build_long_name(col, is_qc=is_qc)}
+
+        if is_qc:
+            var_attrs["units"] = "1"
+            if dtype == "u1":
+                var_attrs.update(_QC_FLAG_ATTRS)
+            elif dtype in ("i4", "i8"):
+                var_attrs["comment"] = (
+                    "12-digit composite quality flag (METEOSENS). "
+                    "Each cipher encodes a specific check."
+                )
+        else:
+            var_attrs["units"] = _get_units(col)
+            sn = _get_standard_name(col)
+            if sn:
+                var_attrs["standard_name"] = sn
+
+        dv[nc_name] = xr.DataArray(arr, dims=["time"], attrs=var_attrs)
+
+    if skipped:
+        print(f"    Skipped {len(skipped)} non-numeric column(s): "
+              f"{', '.join(skipped[:5])}{'…' if len(skipped) > 5 else ''}")
+
+    return xr.Dataset(dv, coords=coords)
+
+
+def _write_group_to_zarr(
+    store_path: str,
+    group_path: str,
+    df: pd.DataFrame,
+    ts_start: pd.DatetimeIndex,
+    ts_end: pd.DatetimeIndex | None,
+    freq_code: str,
+    global_attrs: dict,
+    column_instruments: dict,
+) -> None:
+    """Build an xr.Dataset from *df* and write it to zarr at *group_path*."""
+    import xarray as xr
+
+    used_names: set[str] = set()
+    consumed:   set[str] = set()
+    datasets:   list     = []
+
+    # ── Multi-dimensional families ────────────────────────────────────────────
+    # Filter to columns not yet consumed (mirrors _write_multidim's skip logic)
+    data_cols = set(df.columns) - _TS_COLS
+
+    nee_ds, nee_c = _build_nee_dataset(df, ts_start)
+    datasets.append(nee_ds); consumed |= nee_c; used_names.update(nee_ds.data_vars)
+
+    for _base in ("GPP", "RECO"):
+        ds, c = _build_gppeco_dataset(df, ts_start, _base)
+        datasets.append(ds); consumed |= c; used_names.update(ds.data_vars)
+
+    for _base in ("LE", "H"):
+        ds, c = _build_energy_corr_dataset(df, ts_start, _base)
+        datasets.append(ds); consumed |= c; used_names.update(ds.data_vars)
+
+    soil_ds, soil_c = _build_soil_dataset(df, ts_start)
+    datasets.append(soil_ds); consumed |= soil_c; used_names.update(soil_ds.data_vars)
+
+    # Profile (METEOSENS triple-index) — only from columns not already consumed
+    remaining_df = df[[c for c in df.columns if c in _TS_COLS or c not in consumed]]
+    prof_ds, prof_c = _build_profile_dataset(remaining_df, ts_start,
+                                              used_names, column_instruments)
+    datasets.append(prof_ds); consumed |= prof_c; used_names.update(prof_ds.data_vars)
+
+    # Single-index gradients
+    remaining_df = df[[c for c in df.columns if c in _TS_COLS or c not in consumed]]
+    sidx_ds, sidx_c, not_collapsed = _build_single_idx_dataset(remaining_df, ts_start, used_names)
+    datasets.append(sidx_ds); consumed |= sidx_c; used_names.update(sidx_ds.data_vars)
+
+    # ── 1-D fallback ──────────────────────────────────────────────────────────
+    skip_1d = consumed  # not_collapsed columns fall through to 1-D naturally
+    ds_1d = _build_1d_dataset(df, ts_start, ts_end, freq_code, skip_1d, used_names)
+    datasets.append(ds_1d)
+
+    # ── Merge & annotate ──────────────────────────────────────────────────────
+    merged = xr.merge(datasets, combine_attrs="no_conflicts")
+    merged.attrs.update(global_attrs)
+
+    # ── Write to zarr ─────────────────────────────────────────────────────────
+    # Build per-variable encoding (fill values + dtypes)
+    encoding: dict = {}
+    for vname, da in merged.data_vars.items():
+        if da.dtype == np.float32 or da.dtype == np.float64:
+            encoding[vname] = {"_FillValue": float(FILL_VALUE_OUT), "dtype": "float32"}
+        elif da.dtype == np.uint8:
+            encoding[vname] = {"_FillValue": int(_FV_U8), "dtype": "uint8"}
+        elif da.dtype == np.int8:
+            encoding[vname] = {"_FillValue": -1}
+        elif da.dtype in (np.int16, np.int32, np.int64):
+            encoding[vname] = {"_FillValue": -9999}
+
+    n_nd = sum(1 for v in merged.data_vars if len(merged[v].dims) > 1)
+    n_1d = sum(1 for v in merged.data_vars if len(merged[v].dims) == 1)
+    print(f"      {n_nd:2d} multi-dim var(s)  [{len(consumed):3d} flat columns collapsed]"
+          f"  +  {n_1d:3d} 1-D var(s)")
+
+    merged.to_zarr(store_path, group=group_path, mode="w", encoding=encoding)
+
+
+def restructure_to_zarr(
+    csv_paths: list[Path],
+    store_path: str,
+    zarr_group: str,
+    args: argparse.Namespace,
+) -> None:
+    """Restructure ICOS/FLUXNET CSV files and write directly to a zarr store.
+
+    Mirrors ``restructure()`` exactly for CSV reading and data preparation,
+    but writes xarray Datasets to zarr instead of NetCDF4 — no intermediate
+    .nc file is created.
+
+    Parameters
+    ----------
+    csv_paths  : list of CSV file paths (all products for one station)
+    store_path : path to the zarr directory store (e.g. "icos-fluxnet.zarr")
+    zarr_group : top-level group name in the store (e.g. "SE-Svb")
+    args       : Namespace with site_id, doi_url, dobj_citation,
+                 column_instruments, comment
+    """
+    sources: list[tuple[int, str, Path, pd.DataFrame, str]] = []
+    site_id = args.site_id
+
+    for csv_path in csv_paths:
+        print(f"Reading  {csv_path.name}")
+        df    = _read_csv(csv_path)
+        finfo = parse_filename(csv_path)
+        if not site_id:
+            site_id = finfo.get("site_id", "unknown")
+
+        if "TIMESTAMP_START" in df.columns:
+            ts_col = "TIMESTAMP_START"
+        elif "TIMESTAMP" in df.columns:
+            ts_col = "TIMESTAMP"
+        else:
+            print(f"  WARNING: no timestamp column — skipping {csv_path.name}",
+                  file=sys.stderr)
+            continue
+
+        ts_start  = _parse_timestamps(df[ts_col])
+        freq_code = _detect_freq_code(csv_path) or _infer_freq_code(ts_start)
+        sources.append((
+            _product_priority(csv_path),
+            _group_name(csv_path),
+            csv_path, df, freq_code,
+        ))
+
+    if not sources:
+        sys.exit("ERROR: no valid CSV files found.")
+
+    sources.sort(key=lambda x: (x[4], x[0]))
+
+    HH_CODES    = {"HH", "HR"}
+    hh_sources  = [(p, g, path, df, fc) for p, g, path, df, fc in sources if fc in HH_CODES]
+    agg_sources = [(p, g, path, df, fc) for p, g, path, df, fc in sources if fc not in HH_CODES]
+
+    print(f"Fetching ICOS station metadata for {site_id} …")
+    station_meta = fetch_icos_station_meta(site_id)
+
+    doi_url      = getattr(args, "doi_url", "") or ""
+    doi_citation = getattr(args, "doi_citation", "") or ""
+    if not doi_url and getattr(args, "doi", None):
+        print(f"Fetching APA citation for DOI {args.doi} …")
+        doi_url, doi_citation = fetch_doi_citation(args.doi)
+
+    dobj_citation      = getattr(args, "dobj_citation", "") or ""
+    column_instruments = getattr(args, "column_instruments", {}) or {}
+
+    # ── Build global attributes dict ─────────────────────────────────────────
+    global_attrs: dict = {
+        "Conventions": "CF-1.12",
+        "title":       f"ICOS ETC L2 restructured data — site {site_id}",
+        "institution": "ICOS Carbon Portal / FLUXNET",
+        "site_id":     site_id,
+        "featureType": "timeSeries",
+        "history":     (
+            f"Created {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')} "
+            "by fluxnet2zarr.py"
+        ),
+        "references": (
+            "Pastorello et al. (2020) The FLUXNET2015 dataset and the ONEFlux "
+            "processing pipeline for eddy covariance data. "
+            "Scientific Data 7:225. https://doi.org/10.1038/s41597-020-0534-3"
+        ),
+    }
+    if getattr(args, "comment", ""):
+        global_attrs["comment"] = args.comment
+    global_attrs.update({k: str(v) for k, v in station_meta.items()})
+    if doi_url:
+        global_attrs["source_doi"]    = doi_url
+    if doi_citation:
+        global_attrs["PartOfDataset"] = doi_citation
+    if dobj_citation:
+        global_attrs["citation"]      = dobj_citation
+
+    written_by_res: dict[str, set[str]] = {}
+
+    # ── Half-hourly: merge all HH products, write to root zarr group ─────────
+    if hh_sources:
+        norm_count:  dict[str, int] = {}
+        col_to_norm: dict[str, str] = {}
+        for _, _, _, df, _ in hh_sources:
+            seen: set[str] = set()
+            for col in df.columns:
+                if col not in _TS_COLS:
+                    norm = _qc_norm(col)
+                    col_to_norm[col] = norm
+                    if norm not in seen:
+                        norm_count[norm] = norm_count.get(norm, 0) + 1
+                        seen.add(norm)
+
+        hh_dupes    = {col for col, norm in col_to_norm.items()
+                       if norm_count.get(norm, 0) > 1}
+        hh_freq_code = hh_sources[0][4]
+
+        parsed: list[tuple[Path, pd.DataFrame, pd.DatetimeIndex]] = []
+        for _, _, path, df, _ in hh_sources:
+            src_ts = ("TIMESTAMP_START" if "TIMESTAMP_START" in df.columns else "TIMESTAMP")
+            parsed.append((path, df, _parse_timestamps(df[src_ts])))
+
+        all_ts: pd.DatetimeIndex = parsed[0][2]
+        for _, _, ts in parsed[1:]:
+            all_ts = all_ts.union(ts)
+
+        data_parts: list[pd.DataFrame] = []
+        for _, df, ts_idx in parsed:
+            unique_cols = [c for c in df.columns
+                           if c not in _TS_COLS and c not in hh_dupes]
+            if unique_cols:
+                part       = df[unique_cols].copy()
+                part.index = ts_idx
+                data_parts.append(part.reindex(all_ts))
+        merged = (pd.concat(data_parts, axis=1) if data_parts
+                  else pd.DataFrame(index=all_ts))
+
+        ts_start = all_ts
+        ts_end_hh: pd.DatetimeIndex | None = (
+            pd.DatetimeIndex([t + _FREQ_OFFSET[hh_freq_code] for t in ts_start])
+            if hh_freq_code in _FREQ_OFFSET else None
+        )
+
+        source_names = [p.name for p, _, _ in parsed]
+        grp_attrs    = {**global_attrs, "source": ", ".join(source_names)}
+        print(f"  /  (root)  [{hh_freq_code}]  ({len(hh_dupes)} duplicate column(s) removed)")
+        _write_group_to_zarr(store_path, zarr_group, merged, ts_start, ts_end_hh,
+                             hh_freq_code, grp_attrs, column_instruments)
+        written_by_res[hh_freq_code] = set(merged.columns) - _TS_COLS
+
+    # ── Aggregated products: one child zarr group each ────────────────────────
+    for _priority, grp_name, csv_path, df, freq_code in agg_sources:
+        if "TIMESTAMP_START" in df.columns:
+            ts_start = _parse_timestamps(df["TIMESTAMP_START"])
+            ts_end   = (_parse_timestamps(df["TIMESTAMP_END"])
+                        if "TIMESTAMP_END" in df.columns else None)
+        else:
+            ts_start = _parse_timestamps(df["TIMESTAMP"])
+            ts_end   = None
+
+        if ts_end is None and freq_code in _FREQ_OFFSET:
+            ts_end = pd.DatetimeIndex([t + _FREQ_OFFSET[freq_code] for t in ts_start])
+
+        skip_vars = written_by_res.get(freq_code, set())
+        n_dup     = sum(1 for c in df.columns if c not in _TS_COLS and c in skip_vars)
+        dup_note  = f"  ({n_dup} duplicate(s) skipped)" if n_dup else ""
+        print(f"  /{grp_name:22s}  [{freq_code}]{dup_note}")
+
+        # Build a filtered DataFrame excluding already-written columns
+        avail_cols = [c for c in df.columns if c in _TS_COLS or c not in skip_vars]
+        avail_df   = df[avail_cols]
+
+        grp_attrs = {**global_attrs, "source": csv_path.name}
+        _write_group_to_zarr(store_path, f"{zarr_group}/{grp_name}", avail_df,
+                             ts_start, ts_end, freq_code, grp_attrs, {})
+
+        written_cols = set(avail_df.columns) - _TS_COLS
+        written_by_res.setdefault(freq_code, set()).update(written_cols)
+
+    print(f"Done →   zarr://{store_path}/{zarr_group}")
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:

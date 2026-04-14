@@ -102,6 +102,74 @@ python patch_instruments.py 10.18160/R3G6-Z8ZH --overwrite
 
 ---
 
+### `fluxnet2zarr.py` — zarr store from DOI (no intermediate .nc files)
+
+Resolves an ICOS collection DOI, downloads the ARCHIVE zip for each station,
+extracts the needed CSVs, and writes directly to a zarr v2 store.  No
+intermediate `*_restructured.nc` files are created.
+
+```
+# Populate one station
+python fluxnet2zarr.py 10.18160/R3G6-Z8ZH --station SE-Svb
+
+# Populate all 35 stations
+python fluxnet2zarr.py 10.18160/R3G6-Z8ZH
+
+# Custom store location, keep intermediate files
+python fluxnet2zarr.py 10.18160/R3G6-Z8ZH \
+       --store /data/icos.zarr --keep-zip --keep-csv
+
+# Manage the store
+python fluxnet2zarr.py list
+python fluxnet2zarr.py info  SE-Svb
+python fluxnet2zarr.py remove SE-Svb
+```
+
+**`populate` options:**
+
+| Option | Default | Description |
+|---|---|---|
+| `doi` | (required) | Collection DOI (with or without `https://doi.org/` prefix) |
+| `--store DIR` | `icos-fluxnet.zarr` | Zarr store directory |
+| `--station ID ...` | all | Limit to specific station IDs |
+| `--outdir DIR` | `.` | Directory for temporary downloads and CSVs |
+| `--keep-zip` | off | Keep downloaded ARCHIVE zip after extraction |
+| `--keep-csv` | off | Keep extracted CSV files after ingestion |
+| `--comment TEXT` | — | Free-text comment added as a global attribute |
+
+**Store layout:**
+
+```
+icos-fluxnet.zarr/
+  SE-Svb/               ← root zarr group: merged HH data
+    .zgroup
+    .zattrs             ← CF global attrs + _provenance JSON
+    time/               ← zarr arrays
+    NEE/                ← 3-D: (time, ustar_threshold, nee_variant)
+    TA/                 ← 4-D: (time, r, h, v) for METEOSENS profiles
+    …
+    fluxnet_dd/         ← daily aggregated sub-group
+    fluxnet_mm/         ← monthly aggregated sub-group
+    fluxnet_ww/         ← weekly aggregated sub-group
+    fluxnet_yy/         ← yearly aggregated sub-group
+  DE-Hai/
+    …
+```
+
+Each station group's `.zattrs` contains a `_provenance` JSON key with
+`created`, `last_updated`, `archive`, `source_doi`, `citation`, and a
+`history` list recording every ingest action.
+
+**Reading with xarray:**
+
+```python
+import xarray as xr
+ds = xr.open_zarr("icos-fluxnet.zarr", group="SE-Svb")
+print(ds["NEE"])   # DataArray(time, ustar_threshold, nee_variant)
+```
+
+---
+
 ### `icos_download_restructure.py` — full pipeline from DOI
 
 Resolves an ICOS collection DOI, downloads the ARCHIVE zip for each
