@@ -154,7 +154,10 @@ def cmd_populate(args: argparse.Namespace) -> None:
         zip_path = outdir / arch["name"].replace(" ", "_")
         if not zip_path.suffix:
             zip_path = zip_path.with_suffix(".zip")
-        download_zip(arch["hash_id"], zip_path, label=site_id)
+        if zip_path.exists() and zip_path.stat().st_size > 0:
+            print(f"  Using cached {zip_path.name}")
+        else:
+            download_zip(arch["hash_id"], zip_path, label=site_id)
 
         # ── Extract CSVs ──────────────────────────────────────────────────────
         csv_paths = extract_needed_csvs(zip_path, outdir)
