@@ -1709,6 +1709,21 @@ def _build_1d_dataset(df: pd.DataFrame, ts_start: pd.DatetimeIndex,
     return xr.Dataset(dv, coords=coords)
 
 
+def _encoding_for(ds) -> dict:
+    """Return a per-variable encoding dict for *ds* (fill values + dtypes)."""
+    enc: dict = {}
+    for vname, da in ds.data_vars.items():
+        if da.dtype in (np.float32, np.float64):
+            enc[vname] = {"_FillValue": float(FILL_VALUE_OUT), "dtype": "float32"}
+        elif da.dtype == np.uint8:
+            enc[vname] = {"_FillValue": int(_FV_U8), "dtype": "uint8"}
+        elif da.dtype == np.int8:
+            enc[vname] = {"_FillValue": -1}
+        elif da.dtype in (np.int16, np.int32, np.int64):
+            enc[vname] = {"_FillValue": -9999}
+    return enc
+
+
 def _write_group_to_zarr(
     store_path: str,
     group_path: str,
@@ -1719,70 +1734,66 @@ def _write_group_to_zarr(
     global_attrs: dict,
     column_instruments: dict,
 ) -> None:
-    """Build an xr.Dataset from *df* and write it to zarr at *group_path*."""
+    """Build datasets from *df* and write them incrementally to zarr at *group_path*.
+
+    Each variable family is written as soon as it is built — no xr.merge() over
+    all variables — keeping peak memory low and avoiding the O(n²) merge cost.
+    """
     import xarray as xr
 
     used_names: set[str] = set()
     consumed:   set[str] = set()
-    datasets:   list     = []
+    first      = True   # first write uses mode="w" (creates group + global attrs)
+    n_nd = n_1d = 0
+
+    def _flush(ds: "xr.Dataset") -> None:
+        """Write *ds* to the zarr group; first call creates it, rest append vars."""
+        nonlocal first
+        if not ds.data_vars:
+            return
+        ds.attrs.update(global_attrs if first else {})
+        ds.to_zarr(store_path, group=group_path,
+                   mode="w" if first else "a",
+                   encoding=_encoding_for(ds))
+        first = False
 
     # ── Multi-dimensional families ────────────────────────────────────────────
-    # Filter to columns not yet consumed (mirrors _write_multidim's skip logic)
-    data_cols = set(df.columns) - _TS_COLS
-
-    nee_ds, nee_c = _build_nee_dataset(df, ts_start)
-    datasets.append(nee_ds); consumed |= nee_c; used_names.update(nee_ds.data_vars)
+    nee_ds, c = _build_nee_dataset(df, ts_start)
+    consumed |= c; used_names.update(nee_ds.data_vars)
+    n_nd += len(nee_ds.data_vars); _flush(nee_ds); del nee_ds
 
     for _base in ("GPP", "RECO"):
         ds, c = _build_gppeco_dataset(df, ts_start, _base)
-        datasets.append(ds); consumed |= c; used_names.update(ds.data_vars)
+        consumed |= c; used_names.update(ds.data_vars)
+        n_nd += len(ds.data_vars); _flush(ds); del ds
 
     for _base in ("LE", "H"):
         ds, c = _build_energy_corr_dataset(df, ts_start, _base)
-        datasets.append(ds); consumed |= c; used_names.update(ds.data_vars)
+        consumed |= c; used_names.update(ds.data_vars)
+        n_nd += len(ds.data_vars); _flush(ds); del ds
 
-    soil_ds, soil_c = _build_soil_dataset(df, ts_start)
-    datasets.append(soil_ds); consumed |= soil_c; used_names.update(soil_ds.data_vars)
+    soil_ds, c = _build_soil_dataset(df, ts_start)
+    consumed |= c; used_names.update(soil_ds.data_vars)
+    n_nd += len(soil_ds.data_vars); _flush(soil_ds); del soil_ds
 
     # Profile (METEOSENS triple-index) — only from columns not already consumed
-    remaining_df = df[[c for c in df.columns if c in _TS_COLS or c not in consumed]]
-    prof_ds, prof_c = _build_profile_dataset(remaining_df, ts_start,
-                                              used_names, column_instruments)
-    datasets.append(prof_ds); consumed |= prof_c; used_names.update(prof_ds.data_vars)
+    remaining_df = df[[col for col in df.columns if col in _TS_COLS or col not in consumed]]
+    prof_ds, c = _build_profile_dataset(remaining_df, ts_start, used_names, column_instruments)
+    consumed |= c; used_names.update(prof_ds.data_vars)
+    n_nd += len(prof_ds.data_vars); _flush(prof_ds); del prof_ds
 
     # Single-index gradients
-    remaining_df = df[[c for c in df.columns if c in _TS_COLS or c not in consumed]]
-    sidx_ds, sidx_c, not_collapsed = _build_single_idx_dataset(remaining_df, ts_start, used_names)
-    datasets.append(sidx_ds); consumed |= sidx_c; used_names.update(sidx_ds.data_vars)
+    remaining_df = df[[col for col in df.columns if col in _TS_COLS or col not in consumed]]
+    sidx_ds, c, _ = _build_single_idx_dataset(remaining_df, ts_start, used_names)
+    consumed |= c; used_names.update(sidx_ds.data_vars)
+    n_nd += len(sidx_ds.data_vars); _flush(sidx_ds); del sidx_ds
 
     # ── 1-D fallback ──────────────────────────────────────────────────────────
-    skip_1d = consumed  # not_collapsed columns fall through to 1-D naturally
-    ds_1d = _build_1d_dataset(df, ts_start, ts_end, freq_code, skip_1d, used_names)
-    datasets.append(ds_1d)
+    ds_1d = _build_1d_dataset(df, ts_start, ts_end, freq_code, consumed, used_names)
+    n_1d = len(ds_1d.data_vars); _flush(ds_1d); del ds_1d
 
-    # ── Merge & annotate ──────────────────────────────────────────────────────
-    merged = xr.merge(datasets, combine_attrs="no_conflicts")
-    merged.attrs.update(global_attrs)
-
-    # ── Write to zarr ─────────────────────────────────────────────────────────
-    # Build per-variable encoding (fill values + dtypes)
-    encoding: dict = {}
-    for vname, da in merged.data_vars.items():
-        if da.dtype == np.float32 or da.dtype == np.float64:
-            encoding[vname] = {"_FillValue": float(FILL_VALUE_OUT), "dtype": "float32"}
-        elif da.dtype == np.uint8:
-            encoding[vname] = {"_FillValue": int(_FV_U8), "dtype": "uint8"}
-        elif da.dtype == np.int8:
-            encoding[vname] = {"_FillValue": -1}
-        elif da.dtype in (np.int16, np.int32, np.int64):
-            encoding[vname] = {"_FillValue": -9999}
-
-    n_nd = sum(1 for v in merged.data_vars if len(merged[v].dims) > 1)
-    n_1d = sum(1 for v in merged.data_vars if len(merged[v].dims) == 1)
     print(f"      {n_nd:2d} multi-dim var(s)  [{len(consumed):3d} flat columns collapsed]"
           f"  +  {n_1d:3d} 1-D var(s)")
-
-    merged.to_zarr(store_path, group=group_path, mode="w", encoding=encoding)
 
 
 def restructure_to_zarr(
