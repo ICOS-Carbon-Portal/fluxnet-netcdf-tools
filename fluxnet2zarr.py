@@ -37,8 +37,10 @@ Dependencies
 
 import argparse
 import json
+import os
 import re
 import shutil
+import stat
 import sys
 from argparse import Namespace
 from datetime import datetime, timezone
@@ -68,6 +70,18 @@ _NC_STATION_RE = re.compile(r"ICOSETC_([^_]+-[^_]+)_", re.IGNORECASE)
 
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _rmtree(path: Path) -> None:
+    """Robustly remove a directory tree on Windows (clears read-only bits first)."""
+    def _onexc(func, p, _):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+
+    shutil.rmtree(path, onexc=_onexc)
 
 
 def _prov_get(grp: zarr.Group) -> dict:
@@ -181,7 +195,7 @@ def cmd_populate(args: argparse.Namespace) -> None:
         if site_id in store:
             store_dir = Path(store_path) / site_id
             if store_dir.is_dir():
-                shutil.rmtree(store_dir)
+                _rmtree(store_dir)
             # Re-open after rmtree so zarr's in-memory state is consistent
             store = zarr.open_group(store_path, mode="a")
 
@@ -226,7 +240,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
 
     store_dir = Path(store_path) / site_id
     if store_dir.is_dir():
-        shutil.rmtree(store_dir)
+        _rmtree(store_dir)
         print(f"Removed {site_id} from {store_path}")
         zarr.consolidate_metadata(store_path)
     else:

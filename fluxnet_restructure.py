@@ -1733,11 +1733,18 @@ def _write_group_to_zarr(
     freq_code: str,
     global_attrs: dict,
     column_instruments: dict,
-) -> None:
+    *,
+    write_profiles: bool = True,
+) -> set[str]:
     """Build datasets from *df* and write them incrementally to zarr at *group_path*.
 
     Each variable family is written as soon as it is built — no xr.merge() over
     all variables — keeping peak memory low and avoiding the O(n²) merge cost.
+
+    When *write_profiles* is False the METEOSENS 4-D profile variables are
+    skipped here; the caller is responsible for writing them to a separate group.
+
+    Returns the set of DataFrame columns consumed (so the caller can skip them).
     """
     import xarray as xr
 
@@ -1776,13 +1783,14 @@ def _write_group_to_zarr(
     consumed |= c; used_names.update(soil_ds.data_vars)
     n_nd += len(soil_ds.data_vars); _flush(soil_ds); del soil_ds
 
-    # Profile (METEOSENS triple-index) — only from columns not already consumed
-    remaining_df = df[[col for col in df.columns if col in _TS_COLS or col not in consumed]]
-    prof_ds, c = _build_profile_dataset(remaining_df, ts_start, used_names, column_instruments)
-    consumed |= c; used_names.update(prof_ds.data_vars)
-    n_nd += len(prof_ds.data_vars); _flush(prof_ds); del prof_ds
+    # ── Profile (METEOSENS triple-index) ──────────────────────────────────────
+    if write_profiles:
+        remaining_df = df[[col for col in df.columns if col in _TS_COLS or col not in consumed]]
+        prof_ds, c = _build_profile_dataset(remaining_df, ts_start, used_names, column_instruments)
+        consumed |= c; used_names.update(prof_ds.data_vars)
+        n_nd += len(prof_ds.data_vars); _flush(prof_ds); del prof_ds
 
-    # Single-index gradients
+    # ── Single-index gradients ────────────────────────────────────────────────
     remaining_df = df[[col for col in df.columns if col in _TS_COLS or col not in consumed]]
     sidx_ds, c, _ = _build_single_idx_dataset(remaining_df, ts_start, used_names)
     consumed |= c; used_names.update(sidx_ds.data_vars)
@@ -1794,6 +1802,7 @@ def _write_group_to_zarr(
 
     print(f"      {n_nd:2d} multi-dim var(s)  [{len(consumed):3d} flat columns collapsed]"
           f"  +  {n_1d:3d} 1-D var(s)")
+    return consumed
 
 
 def restructure_to_zarr(
@@ -1939,9 +1948,31 @@ def restructure_to_zarr(
 
         source_names = [p.name for p, _, _ in parsed]
         grp_attrs    = {**global_attrs, "source": ", ".join(source_names)}
+
+        # METEOSENS 4-D profiles go to a dedicated sub-group to keep the root
+        # HH group lean.  Identify which source paths are METEOSENS.
+        meteosens_paths = {path for _, grp, path, _, _ in hh_sources
+                           if grp == "meteosens"}
+        has_meteosens = bool(meteosens_paths)
+
         print(f"  /  (root)  [{hh_freq_code}]  ({len(hh_dupes)} duplicate column(s) removed)")
-        _write_group_to_zarr(store_path, zarr_group, merged, ts_start, ts_end_hh,
-                             hh_freq_code, grp_attrs, column_instruments)
+        consumed_hh = _write_group_to_zarr(
+            store_path, zarr_group, merged, ts_start, ts_end_hh,
+            hh_freq_code, grp_attrs, column_instruments,
+            write_profiles=not has_meteosens,
+        )
+
+        # Write METEOSENS profiles to a dedicated sub-group
+        if has_meteosens:
+            ms_attrs = {**global_attrs,
+                        "source": ", ".join(p.name for p in meteosens_paths)}
+            print(f"  /meteosens             [{hh_freq_code}]")
+            _write_group_to_zarr(
+                store_path, f"{zarr_group}/meteosens", merged, ts_start, ts_end_hh,
+                hh_freq_code, ms_attrs, column_instruments,
+                write_profiles=True,
+            )
+
         written_by_res[hh_freq_code] = set(merged.columns) - _TS_COLS
 
     # ── Aggregated products: one child zarr group each ────────────────────────
