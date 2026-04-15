@@ -1761,7 +1761,8 @@ def _write_group_to_zarr(
         ds.attrs.update(global_attrs if first else {})
         ds.to_zarr(store_path, group=group_path,
                    mode="w" if first else "a",
-                   encoding=_encoding_for(ds))
+                   encoding=_encoding_for(ds),
+                   consolidated=False)
         first = False
 
     # ── Multi-dimensional families ────────────────────────────────────────────
