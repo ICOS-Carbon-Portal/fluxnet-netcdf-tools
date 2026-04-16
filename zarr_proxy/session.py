@@ -22,12 +22,13 @@ class ChunkRecord:
 @dataclass
 class Session:
     ip: str
-    started_at: float = field(default_factory=time.time)
-    last_seen:  float = field(default_factory=time.time)
-    groups:     set[str]       = field(default_factory=set)
-    arrays:     set[str]       = field(default_factory=set)
-    chunks:     list[ChunkRecord] = field(default_factory=list)
+    started_at:  float = field(default_factory=time.time)
+    last_seen:   float = field(default_factory=time.time)
+    groups:      set[str]        = field(default_factory=set)
+    arrays:      set[str]        = field(default_factory=set)
+    chunks:      list[ChunkRecord] = field(default_factory=list)
     bytes_total: int = 0
+    passport_pid: str = ""   # filled after minting; enables GET /session/passport
 
     def touch(self) -> None:
         self.last_seen = time.time()
@@ -89,6 +90,11 @@ def get_or_create(ip: str) -> Session:
 
 def record(ip: str, key: str, data: bytes) -> None:
     get_or_create(ip).record_chunk(key, data)
+
+
+def pop(ip: str) -> Session | None:
+    """Remove and return the active session for *ip*, or None if no session exists."""
+    return _sessions.pop(ip, None)
 
 
 async def _reaper_loop() -> None:

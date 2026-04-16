@@ -13,6 +13,24 @@ import uuid
 from . import config
 
 
+def _handle_request(method: str, url: str, payload: bytes) -> bool:
+    req = urllib.request.Request(
+        url, data=payload, method=method,
+        headers={
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {config.HANDLE_TOKEN}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.status in (200, 201, 204)
+    except urllib.error.HTTPError as exc:
+        print(f"[handle] HTTP {exc.code} {method} {url}: {exc.read().decode()[:200]}")
+    except Exception as exc:
+        print(f"[handle] Error {method} {url}: {exc}")
+    return False
+
+
 def mint(target_url: str) -> str:
     """
     Create a new Handle pointing to *target_url*.
@@ -33,22 +51,19 @@ def mint(target_url: str) -> str:
         }
     ]).encode()
 
-    req = urllib.request.Request(
-        endpoint,
-        data=payload,
-        method="PUT",
-        headers={
-            "Content-Type":  "application/json",
-            "Authorization": f"Bearer {config.HANDLE_TOKEN}",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            if resp.status in (200, 201):
-                return f"hdl:{handle}"
-    except urllib.error.HTTPError as exc:
-        print(f"[handle] HTTP {exc.code} minting handle: {exc.read().decode()[:200]}")
-    except Exception as exc:
-        print(f"[handle] Error minting handle: {exc}")
+    ok = _handle_request("PUT", endpoint, payload)
+    return f"hdl:{handle}" if ok else ""
 
-    return ""
+
+def update(pid: str, target_url: str) -> bool:
+    """
+    Update an existing Handle to point to a new URL (PATCH semantics via PUT).
+    *pid* may include the 'hdl:' prefix or not.
+    """
+    if not config.HANDLE_TOKEN or not config.HANDLE_ENDPOINT:
+        return False
+
+    handle   = pid.removeprefix("hdl:")
+    endpoint = f"{config.HANDLE_ENDPOINT}/{handle}"
+    payload  = json.dumps([{"type": "URL", "parsed_data": target_url}]).encode()
+    return _handle_request("PUT", endpoint, payload)

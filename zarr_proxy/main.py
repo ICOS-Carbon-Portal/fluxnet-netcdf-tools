@@ -29,34 +29,39 @@ log = logging.getLogger("zarr_proxy")
 STORE = pathlib.Path(config.ZARR_STORE_PATH).resolve()
 
 
-# ── Passport pipeline (called when a session closes) ─────────────────────────
+# ── Passport pipeline ────────────────────────────────────────────────────────
 
-async def _on_session_close(s: session.Session) -> None:
+async def _mint_passport(s: session.Session) -> str:
+    """
+    Run the full passport pipeline for *s* and return the Handle PID (or "").
+    Stores the PID on s.passport_pid so GET /session/passport can retrieve it.
+    """
+    import hashlib
+    from . import cp_client
+
     log.info(
-        "[session] closed  ip=%-16s  groups=%d  arrays=%d  chunks=%d  bytes=%d",
+        "[session] closing  ip=%-16s  groups=%d  arrays=%d  chunks=%d  bytes=%d",
         s.ip, len(s.groups), len(s.arrays), len(s.chunks), s.bytes_total,
     )
 
-    # 1. Build passport (without Handle PID / CP URL yet)
+    # 1. Build passport
     p, sha256 = passport.build(s)
 
-    # 2. Mint Handle PID (target = CP landing page; use placeholder until CP URL is known)
+    # 2. Mint Handle PID pointing to a placeholder until CP URL is known
     pid = handle_client.mint(target_url=f"https://data.icos-cp.eu/passport/{sha256[:16]}")
-
-    # 3. Upload to ICOS CP (updates target URL in passport first)
-    from . import cp_client
     if pid:
-        p["@graph"][1]["@id"]  = pid
-        p["@graph"][1]["url"]  = ""     # will be filled by CP response
+        p["@graph"][1]["@id"] = pid
+        p["@graph"][1]["url"] = ""
+
+    # 3. Upload to ICOS CP
     cp_url = cp_client.upload(p, sha256)
     if cp_url:
         p["@graph"][1]["url"] = cp_url
-        # Update Handle to point to the real landing page
+        # Update Handle to resolve to the real CP landing page
         if pid:
-            handle_client.mint(target_url=cp_url)   # mints a second handle; TODO: update instead
+            handle_client.update(pid, target_url=cp_url)
 
-    # 4. Recompute passportSha256 now that pid + cp_url are final
-    import hashlib
+    # 4. Recompute passportSha256 with final pid + cp_url
     p["@graph"][1]["passportSha256"] = None
     final_bytes = json.dumps(p, sort_keys=True, separators=(",", ":")).encode()
     final_sha   = hashlib.sha256(final_bytes).hexdigest()
@@ -68,6 +73,13 @@ async def _on_session_close(s: session.Session) -> None:
 
     # 6. Matomo
     matomo_client.track(s, passport_pid=pid)
+
+    s.passport_pid = pid
+    return pid
+
+
+async def _on_session_close(s: session.Session) -> None:
+    await _mint_passport(s)
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -89,6 +101,43 @@ def _client_ip(request: Request) -> str:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+@app.post("/session/close")
+async def close_session(request: Request) -> JSONResponse:
+    """
+    Explicitly close the caller's session and synchronously mint a passport.
+    Returns {"passport_pid": "hdl:11676/...", "passport_url": "https://..."}.
+    If the session has no chunks (nothing was read), returns an empty result.
+    """
+    ip = _client_ip(request)
+    s  = session.pop(ip)
+    if s is None or not s.chunks:
+        return JSONResponse({"passport_pid": "", "passport_url": "", "chunks": 0})
+    pid = await _mint_passport(s)
+    return JSONResponse({
+        "passport_pid":  pid,
+        "passport_url":  s.passport_pid and f"https://doi.org/{pid}" or "",
+        "chunks":        len(s.chunks),
+        "bytes_served":  s.bytes_total,
+        "arrays":        sorted(s.arrays),
+    })
+
+
+@app.get("/session/passport")
+async def get_passport(request: Request) -> JSONResponse:
+    """
+    Return the passport PID for the caller's current or most-recently-closed
+    session.  Useful if the client forgot to call /session/close, or wants
+    to poll after the idle timeout fires.
+    """
+    ip = _client_ip(request)
+    s  = session.get_or_create(ip)
+    return JSONResponse({
+        "passport_pid": s.passport_pid,
+        "session_open": bool(s.chunks),
+        "chunks":       len(s.chunks),
+    })
 
 
 @app.get("/")

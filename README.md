@@ -182,12 +182,34 @@ to the ICOS Carbon Portal, and a Matomo usage event is fired.
 python run_proxy.py [--host HOST] [--port PORT] [--store DIR]
 ```
 
-Clients connect with standard xarray/zarr:
+Clients connect with standard xarray/zarr and receive their passport PID
+by calling `POST /session/close` when done:
 
 ```python
-import xarray as xr
+import xarray as xr, requests
+
 ds = xr.open_zarr("http://localhost:8000/", group="SE-Svb", consolidated=True)
-print(ds["NEE"])
+nee = ds["NEE"].isel(time=slice(0, 100)).values   # triggers chunk fetches
+
+# Close session and receive the Handle PID synchronously
+r = requests.post("http://localhost:8000/session/close")
+print(r.json())
+# {
+#   "passport_pid":  "hdl:11676/3f2a1b9c-...",
+#   "passport_url":  "https://meta.icos-cp.eu/objects/...",
+#   "chunks":        134,
+#   "bytes_served":  1851103,
+#   "arrays":        ["GPP", "NEE", "TA", ...]
+# }
+```
+
+If the client never calls `/session/close`, the idle-timeout reaper
+(default 5 min) mints the passport automatically.  The PID can be
+retrieved afterwards with:
+
+```python
+r = requests.get("http://localhost:8000/session/passport")
+print(r.json()["passport_pid"])   # "hdl:11676/..." or "" if still pending
 ```
 
 **Configuration** (environment variables):
