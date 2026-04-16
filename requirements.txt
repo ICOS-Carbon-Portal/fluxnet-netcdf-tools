@@ -2,3 +2,8 @@ numpy
 pandas
 netCDF4
 xarray
+zarr<3
+fastapi
+uvicorn[standard]
+fsspec
+aiohttp
