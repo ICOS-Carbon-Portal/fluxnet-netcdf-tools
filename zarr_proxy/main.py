@@ -107,6 +107,8 @@ def _client_ip(request: Request) -> str:
 async def close_session(request: Request) -> JSONResponse:
     """
     Explicitly close the caller's session and synchronously mint a passport.
+    Accepts an optional JSON body {"queries": [...]} with xarray selection
+    steps recorded client-side by icos_zarr.open_zarr().
     Returns {"passport_pid": "hdl:11676/...", "passport_url": "https://..."}.
     If the session has no chunks (nothing was read), returns an empty result.
     """
@@ -114,6 +116,14 @@ async def close_session(request: Request) -> JSONResponse:
     s  = session.pop(ip)
     if s is None or not s.chunks:
         return JSONResponse({"passport_pid": "", "passport_url": "", "chunks": 0})
+
+    # Attach client-side query log if provided
+    try:
+        body = await request.json()
+        s.queries = body.get("queries", [])
+    except Exception:
+        pass
+
     pid = await _mint_passport(s)
     return JSONResponse({
         "passport_pid":  pid,
@@ -121,6 +131,7 @@ async def close_session(request: Request) -> JSONResponse:
         "chunks":        len(s.chunks),
         "bytes_served":  s.bytes_total,
         "arrays":        sorted(s.arrays),
+        "queries":       s.queries,
     })
 
 

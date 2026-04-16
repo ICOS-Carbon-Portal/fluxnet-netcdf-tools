@@ -121,6 +121,7 @@ def build(session: Session, handle_pid: str = "", cp_url: str = "") -> dict:
                 },
                 "accessedGroups":   sorted(session.groups),
                 "accessedArrays":   sorted(session.arrays),
+                "query":            session.queries or [],
                 "hasPart":          has_parts,
                 "totalBytesServed": session.bytes_total,
                 "totalChunks":      len(session.chunks),

@@ -33,6 +33,8 @@ class ICOSDataset:
     Wraps an xr.Dataset opened from an ICOS zarr proxy server.
     Delegates all attribute access to the underlying dataset, so it behaves
     exactly like xr.Dataset in user code.  Calls POST /session/close on exit.
+    Records xarray selections (.sel / .isel / __getitem__) as the query log
+    and includes them in the passport.
     """
 
     def __init__(
@@ -51,6 +53,7 @@ class ICOSDataset:
         self._passport_dir  = pathlib.Path(passport_dir)
         self._verbose       = verbose
         self._passport: dict | None = None   # filled by close()
+        self._queries: list[dict]   = []     # recorded selection steps
 
     # ── Context manager ───────────────────────────────────────────────────────
 
@@ -74,8 +77,9 @@ class ICOSDataset:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._ds, name)
 
-    def __getitem__(self, key: str) -> Any:
-        return self._ds[key]
+    def __getitem__(self, key: str) -> "_TrackedArray":
+        self._queries.append({"variable": key, "group": self._group})
+        return _TrackedArray(self._ds[key], key, self._group, self._queries)
 
     def __repr__(self) -> str:
         return repr(self._ds)
@@ -100,8 +104,12 @@ class ICOSDataset:
         self._passport = {}   # mark as attempted even if request fails
 
         try:
+            body = json.dumps({"queries": self._queries}).encode()
             req  = urllib.request.Request(
-                f"{self._proxy_url}/session/close", method="POST"
+                f"{self._proxy_url}/session/close",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 info = json.loads(resp.read())
@@ -156,6 +164,74 @@ class ICOSDataset:
 
 def _print(msg: str) -> None:
     print(msg)
+
+
+class _TrackedArray:
+    """
+    Thin wrapper around xr.DataArray that records .sel() and .isel() calls
+    into the parent ICOSDataset query log, then delegates everything else.
+    """
+
+    def __init__(
+        self,
+        da: xr.DataArray,
+        variable: str,
+        group: str,
+        queries: list[dict],
+    ) -> None:
+        self._da       = da
+        self._variable = variable
+        self._group    = group
+        self._queries  = queries
+
+    def sel(self, indexers: dict | None = None, **kwargs) -> "_TrackedArray":
+        merged = {**(indexers or {}), **kwargs}
+        self._queries.append({
+            "variable": self._variable,
+            "group":    self._group,
+            "sel":      {k: _serialise(v) for k, v in merged.items()},
+        })
+        return _TrackedArray(
+            self._da.sel(merged), self._variable, self._group, self._queries
+        )
+
+    def isel(self, indexers: dict | None = None, **kwargs) -> "_TrackedArray":
+        merged = {**(indexers or {}), **kwargs}
+        self._queries.append({
+            "variable": self._variable,
+            "group":    self._group,
+            "isel":     {k: _serialise(v) for k, v in merged.items()},
+        })
+        return _TrackedArray(
+            self._da.isel(merged), self._variable, self._group, self._queries
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._da, name)
+
+    def __getitem__(self, key) -> Any:
+        return self._da[key]
+
+    def __repr__(self) -> str:
+        return repr(self._da)
+
+    def __array__(self, dtype=None):
+        return self._da.__array__(dtype)
+
+
+def _serialise(v: Any) -> Any:
+    """Convert indexer values to JSON-serialisable form."""
+    if isinstance(v, slice):
+        return {"start": v.start, "stop": v.stop, "step": v.step}
+    try:
+        import numpy as np
+        if isinstance(v, np.integer):
+            return int(v)
+        if isinstance(v, np.ndarray):
+            return v.tolist()
+    except ImportError:
+        pass
+    return v
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

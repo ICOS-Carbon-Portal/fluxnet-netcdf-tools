@@ -28,7 +28,8 @@ class Session:
     arrays:      set[str]        = field(default_factory=set)
     chunks:      list[ChunkRecord] = field(default_factory=list)
     bytes_total: int = 0
-    passport_pid: str = ""   # filled after minting; enables GET /session/passport
+    passport_pid: str = ""        # filled after minting; enables GET /session/passport
+    queries: list[dict] = field(default_factory=list)  # xarray selection steps from client
 
     def touch(self) -> None:
         self.last_seen = time.time()
