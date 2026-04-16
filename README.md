@@ -182,6 +182,45 @@ to the ICOS Carbon Portal, and a Matomo usage event is fired.
 python run_proxy.py [--host HOST] [--port PORT] [--store DIR]
 ```
 
+**`icos_zarr.open_zarr()`** is the recommended client — it wraps
+`xr.open_zarr` and mints the passport automatically when the dataset is
+closed, printing the Handle PID and landing page with no extra work from
+the user:
+
+```python
+from icos_zarr import open_zarr
+
+# Context manager — passport minted automatically on __exit__
+with open_zarr("http://localhost:8000/", group="SE-Svb") as ds:
+    nee = ds["NEE"].isel(time=slice(0, 100)).values
+# Passport minted : hdl:11676/3f2a1b9c-...
+# Landing page    : https://meta.icos-cp.eu/objects/...
+# Saved to        : .passport/20260416T210000_SE-Svb.json
+
+# Or explicit close — useful in notebooks
+ds = open_zarr("http://localhost:8000/", group="SE-Svb/fluxnet_dd")
+gpp = ds["GPP"].values
+passport = ds.close()
+print(passport["passport_pid"])   # "hdl:11676/..."
+```
+
+`ICOSDataset` delegates all attribute and item access to the underlying
+`xr.Dataset`, so it is a drop-in replacement.  A `__del__` safety net
+fires the close if the user never calls it explicitly.
+
+`open_zarr` options:
+
+| Argument | Default | Description |
+|---|---|---|
+| `proxy_url` | (required) | Base URL of the zarr proxy |
+| `group` | `""` | Zarr group, e.g. `"SE-Svb"` or `"SE-Svb/fluxnet_dd"` |
+| `save_passport` | `True` | Save passport JSON to `passport_dir` on close |
+| `passport_dir` | `".passport/"` | Directory for saved passport files |
+| `verbose` | `True` | Print PID and landing page on close |
+| `**xr_kwargs` | — | Forwarded to `xr.open_zarr()` |
+
+Advanced users can still call the proxy endpoints directly:
+
 Clients connect with standard xarray/zarr and receive their passport PID
 by calling `POST /session/close` when done:
 
