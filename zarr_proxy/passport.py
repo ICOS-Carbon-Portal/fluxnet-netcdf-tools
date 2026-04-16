@@ -85,9 +85,10 @@ def build(session: Session, handle_pid: str = "", cp_url: str = "") -> dict:
         })
 
     # Station-level metadata (best-effort)
+    store_path = str(pathlib.Path(config.ZARR_STORE_DIR) / session.store)
     station_meta = {}
     for g in sorted(session.groups):
-        m = _station_metadata(config.ZARR_STORE_PATH, g)
+        m = _station_metadata(store_path, g)
         if m:
             station_meta = m
             break

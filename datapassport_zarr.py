@@ -5,7 +5,7 @@ Usage
 -----
     from datapassport_zarr import open_zarr
 
-    with open_zarr("http://localhost:8000/", group="SE-Svb") as ds:
+    with open_zarr("http://localhost:8000/icos-fluxnet.zarr", group="SE-Svb") as ds:
         nee = ds["NEE"].isel(time=slice(0, 100)).values
     # On exit:
     #   Passport minted : hdl:11676/3f2a1b9c-...
@@ -13,7 +13,7 @@ Usage
     #   Saved to        : .passport/20260416T210000_SE-Svb.jsonld  (if save_passport=True)
 
     # Or without context manager — call close() explicitly:
-    ds = open_zarr("http://localhost:8000/", group="SE-Svb")
+    ds = open_zarr("http://localhost:8000/icos-fluxnet.zarr", group="SE-Svb")
     nee = ds["NEE"].values
     passport = ds.close()
     print(passport["passport_pid"])
@@ -251,7 +251,7 @@ def open_zarr(
     Parameters
     ----------
     proxy_url : str
-        Base URL of the zarr proxy, e.g. "http://localhost:8000/"
+        Base URL including the store name, e.g. "http://localhost:8000/icos-fluxnet.zarr"
     group : str
         Zarr group path, e.g. "SE-Svb" or "SE-Svb/fluxnet_dd"
     save_passport : bool
@@ -275,18 +275,18 @@ def open_zarr(
     --------
     # Context manager — passport covers exactly what was fetched inside the block.
     # Lazy arrays that were never computed are NOT included (passport = delivered data).
-    with open_zarr("http://localhost:8000/", group="SE-Svb") as ds:
+    with open_zarr("http://localhost:8000/icos-fluxnet.zarr", group="SE-Svb") as ds:
         nee = ds["NEE"].isel(time=slice(0, 100)).values   # fetched → in passport
         lazy = ds["GPP"].isel(time=0)                     # never computed → not in passport
 
     # Explicit close — passport covers chunks fetched before close() is called.
-    ds = open_zarr("http://localhost:8000/", group="SE-Svb")
+    ds = open_zarr("http://localhost:8000/icos-fluxnet.zarr", group="SE-Svb")
     nee = ds["NEE"].values   # triggers chunk fetches
     passport = ds.close()
     print(passport["passport_pid"])
 
     # Coordinate/metadata-only access is tracked automatically:
-    with open_zarr("http://localhost:8000/", group="SE-Svb") as ds:
+    with open_zarr("http://localhost:8000/icos-fluxnet.zarr", group="SE-Svb") as ds:
         t = ds["time"].values   # fetches time chunks — recorded in passport
     """
     xr_kwargs.setdefault("consolidated", True)

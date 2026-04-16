@@ -4,8 +4,10 @@ All sensitive values should be set via environment variables in production.
 """
 import os
 
-# ── Zarr store ────────────────────────────────────────────────────────────────
-ZARR_STORE_PATH     = os.getenv("ZARR_STORE_PATH", "icos-fluxnet.zarr")
+# ── Zarr stores ───────────────────────────────────────────────────────────────
+# Directory that contains one or more *.zarr stores.
+# Each store is served under its directory name: GET /{store-name}/{key}
+ZARR_STORE_DIR      = os.getenv("ZARR_STORE_DIR", ".")
 
 # ── Session tracking ──────────────────────────────────────────────────────────
 SESSION_TIMEOUT_SEC = int(os.getenv("SESSION_TIMEOUT_SEC", "300"))

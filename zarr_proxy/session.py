@@ -22,6 +22,7 @@ class ChunkRecord:
 @dataclass
 class Session:
     ip: str
+    store: str                   # store name, e.g. "icos-fluxnet.zarr"
     started_at:  float = field(default_factory=time.time)
     last_seen:   float = field(default_factory=time.time)
     groups:      set[str]        = field(default_factory=set)
@@ -72,8 +73,8 @@ def _is_chunk_key(s: str) -> bool:
 
 # ── Session registry ──────────────────────────────────────────────────────────
 
-# ip → Session
-_sessions: dict[str, Session] = {}
+# (ip, store) → Session
+_sessions: dict[tuple[str, str], Session] = {}
 _on_close_callbacks: list[Callable[[Session], Awaitable[None]]] = []
 
 
@@ -81,21 +82,22 @@ def register_on_close(cb: Callable[[Session], Awaitable[None]]) -> None:
     _on_close_callbacks.append(cb)
 
 
-def get_or_create(ip: str) -> Session:
-    s = _sessions.get(ip)
+def get_or_create(ip: str, store: str) -> Session:
+    key = (ip, store)
+    s = _sessions.get(key)
     if s is None:
-        s = Session(ip=ip)
-        _sessions[ip] = s
+        s = Session(ip=ip, store=store)
+        _sessions[key] = s
     return s
 
 
-def record(ip: str, key: str, data: bytes) -> None:
-    get_or_create(ip).record_chunk(key, data)
+def record(ip: str, store: str, key: str, data: bytes) -> None:
+    get_or_create(ip, store).record_chunk(key, data)
 
 
-def pop(ip: str) -> Session | None:
-    """Remove and return the active session for *ip*, or None if no session exists."""
-    return _sessions.pop(ip, None)
+def pop(ip: str, store: str) -> Session | None:
+    """Remove and return the active session for *(ip, store)*, or None."""
+    return _sessions.pop((ip, store), None)
 
 
 async def _reaper_loop() -> None:
