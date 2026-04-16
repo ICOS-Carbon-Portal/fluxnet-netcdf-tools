@@ -170,6 +170,137 @@ print(ds["NEE"])   # DataArray(time, ustar_threshold, nee_variant)
 
 ---
 
+### `run_proxy.py` — zarr data passport proxy
+
+Serves `icos-fluxnet.zarr` as a standard zarr v2 HTTP store.  Every chunk
+request is recorded per client session (keyed by IP address + 5-minute
+rolling window).  When a session goes idle a **data passport** is
+automatically generated, a Handle PID is minted, the passport is uploaded
+to the ICOS Carbon Portal, and a Matomo usage event is fired.
+
+```
+python run_proxy.py [--host HOST] [--port PORT] [--store DIR]
+```
+
+Clients connect with standard xarray/zarr:
+
+```python
+import xarray as xr
+ds = xr.open_zarr("http://localhost:8000/", group="SE-Svb", consolidated=True)
+print(ds["NEE"])
+```
+
+**Configuration** (environment variables):
+
+| Variable | Default | Description |
+|---|---|---|
+| `ZARR_STORE_PATH` | `icos-fluxnet.zarr` | Local zarr store to serve |
+| `SESSION_TIMEOUT_SEC` | `300` | Idle seconds before session closes and passport is minted |
+| `HANDLE_PREFIX` | `11676` | EPIC Handle prefix |
+| `HANDLE_ENDPOINT` | `https://epic5.storage.surfsara.nl/api/handles` | Handle REST API |
+| `HANDLE_TOKEN` | — | Bearer token for Handle minting |
+| `CP_META_UPLOAD` | `https://meta.icos-cp.eu/upload` | ICOS CP metadata upload endpoint |
+| `CP_AUTH_URL` | `https://cpauth.icos-cp.eu/password/login` | CPauth login |
+| `CP_USERNAME` / `CP_PASSWORD` | — | CP credentials |
+| `CP_SUBMITTER_ID` | — | CP submitter ID (assigned by CP team) |
+| `CP_OBJ_SPEC_URL` | — | DataPassport object type URL (TBD with CP team) |
+| `MATOMO_URL` | — | Matomo base URL |
+| `MATOMO_SITE_ID` | — | Matomo site ID |
+| `MATOMO_TOKEN` | — | Matomo auth token |
+| `PASSPORT_DIR` | `passports/` | Local directory for saved passport files |
+
+**Module layout:**
+
+| Module | Responsibility |
+|---|---|
+| `zarr_proxy/main.py` | FastAPI app, zarr key router, session hook |
+| `zarr_proxy/session.py` | IP-based session accumulator, idle-timeout reaper |
+| `zarr_proxy/passport.py` | ROCrate JSON-LD builder, SHA-256 checksums |
+| `zarr_proxy/handle_client.py` | EPIC Handle PID minting |
+| `zarr_proxy/cp_client.py` | ICOS CP metadata upload via CPauth |
+| `zarr_proxy/matomo_client.py` | Server-side Matomo tracking event |
+| `zarr_proxy/config.py` | All configuration with env-var overrides |
+
+**Example data passport** (`passports/{sha256[:16]}.jsonld`):
+
+```json
+{
+  "@context": [
+    "https://w3id.org/ro/crate/1.1/context",
+    {"icos": "https://meta.icos-cp.eu/ontology/cpmeta/"}
+  ],
+  "@graph": [
+    {
+      "@id": "./",
+      "@type": "Dataset",
+      "hasPart": [
+        {"@id": "SE-Svb/NEE"},
+        {"@id": "SE-Svb/fluxnet_dd/NEE"},
+        {"@id": "SE-Svb/fluxnet_dd/GPP"}
+      ]
+    },
+    {
+      "@id": "hdl:11676/3f2a1b9c-7e4d-4a2f-8c1e-9d5f6a7b8c9d",
+      "@type": ["Dataset", "icos:DataPassport"],
+      "name": "Data access passport — GPP, NEE (2026-04-16)",
+      "url": "https://meta.icos-cp.eu/objects/passport_3f2a1b9c",
+      "dateAccessed": "2026-04-16T21:00:00Z",
+      "sessionStart": "2026-04-16T21:00:00Z",
+      "sessionEnd":   "2026-04-16T21:03:32Z",
+      "agent": {
+        "@type": "Agent",
+        "ipAnonymised": "192.168.1.0/24"
+      },
+      "accessedGroups": ["SE-Svb", "SE-Svb/fluxnet_dd"],
+      "accessedArrays": ["GPP", "NEE"],
+      "hasPart": [
+        {
+          "@id": "SE-Svb/NEE",
+          "name": "NEE",
+          "zarr_path": "SE-Svb/NEE",
+          "sha256": "b8185a24d20970258b657bfa28b714d16ace1b1ec44a25566d13539bc18812fe",
+          "sizeInBytes": 12288,
+          "chunkCount": 3
+        },
+        {
+          "@id": "SE-Svb/fluxnet_dd/NEE",
+          "name": "NEE",
+          "zarr_path": "SE-Svb/fluxnet_dd/NEE",
+          "sha256": "effc3f966be6fde17d0d1b61f52f9a5b7fa35472e08861e7b3f42353a513affb",
+          "sizeInBytes": 2048,
+          "chunkCount": 1
+        },
+        {
+          "@id": "SE-Svb/fluxnet_dd/GPP",
+          "name": "GPP",
+          "zarr_path": "SE-Svb/fluxnet_dd/GPP",
+          "sha256": "699a388cd2470da2dc0d145a3b0d078f64350db78a7845cc0b5a4c71083a9d87",
+          "sizeInBytes": 2048,
+          "chunkCount": 1
+        }
+      ],
+      "totalBytesServed": 16384,
+      "totalChunks": 5,
+      "isPartOf": {"@id": "https://doi.org/10.18160/R3G6-Z8ZH"},
+      "citation": "Peichl et al. (2025). ETC L2 ARCHIVE from Svartberget …",
+      "passportSha256": "fed285a18bddad4712bc1a86002fb20fd5ea9c39ba50e2eebe47a965d378c9c3"
+    }
+  ]
+}
+```
+
+Key fields:
+
+| Field | Description |
+|---|---|
+| `@id` | Handle PID minted for this passport |
+| `url` | ICOS CP landing page for the passport |
+| `agent.ipAnonymised` | Caller IP anonymised to /24 (IPv4) or /48 (IPv6) |
+| `hasPart[].sha256` | SHA-256 of sorted chunk digests for each accessed array |
+| `passportSha256` | SHA-256 of the complete passport JSON (with this field set to `null`) — guarantees self-describing integrity |
+
+---
+
 ### `icos_download_restructure.py` — full pipeline from DOI
 
 Resolves an ICOS collection DOI, downloads the ARCHIVE zip for each
