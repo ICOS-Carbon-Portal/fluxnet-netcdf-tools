@@ -170,43 +170,52 @@ print(ds["NEE"])   # DataArray(time, ustar_threshold, nee_variant)
 
 ---
 
-### `run_proxy.py` — zarr data passport proxy
+### `run_proxy.py` + `icos_zarr.py` — zarr data passport proxy
 
-Serves `icos-fluxnet.zarr` as a standard zarr v2 HTTP store.  Every chunk
-request is recorded per client session (keyed by IP address + 5-minute
-rolling window).  When a session goes idle a **data passport** is
-automatically generated, a Handle PID is minted, the passport is uploaded
-to the ICOS Carbon Portal, and a Matomo usage event is fired.
+Serves `icos-fluxnet.zarr` as a standard zarr v2 HTTP store and
+automatically generates a **data passport** for every client session.
 
 ```
 python run_proxy.py [--host HOST] [--port PORT] [--store DIR]
 ```
 
-**`icos_zarr.open_zarr()`** is the recommended client — it wraps
-`xr.open_zarr` and mints the passport automatically when the dataset is
-closed, printing the Handle PID and landing page with no extra work from
-the user:
+**How it works**
+
+1. The proxy (FastAPI) records every zarr chunk served, keyed by client IP.
+2. When a session closes, it builds a ROCrate JSON-LD passport with
+   SHA-256 checksums of all delivered data, mints a Handle PID, uploads
+   the passport to the ICOS Carbon Portal, and fires a Matomo usage event.
+3. The client receives the Handle PID synchronously via `POST /session/close`.
+
+**Recommended client — `icos_zarr.open_zarr()`**
+
+`ICOSDataset` wraps `xr.Dataset` and is a drop-in replacement.
+It records every `.sel()` / `.isel()` call as the query log and sends it
+to the proxy on close.  Passport covers only the data actually delivered
+(lazy arrays that were never computed are not included).
 
 ```python
 from icos_zarr import open_zarr
 
 # Context manager — passport minted automatically on __exit__
 with open_zarr("http://localhost:8000/", group="SE-Svb") as ds:
-    nee = ds["NEE"].isel(time=slice(0, 100)).values
+    nee = ds["NEE"].sel(ustar_threshold="VUT", nee_variant="REF") \
+                   .isel(time=slice(0, 100)).values
+    ta  = ds["TA_F"].values
 # Passport minted : hdl:11676/3f2a1b9c-...
 # Landing page    : https://meta.icos-cp.eu/objects/...
 # Saved to        : .passport/20260416T210000_SE-Svb.json
 
-# Or explicit close — useful in notebooks
+# Explicit close — useful in notebooks; returns the full info dict
 ds = open_zarr("http://localhost:8000/", group="SE-Svb/fluxnet_dd")
 gpp = ds["GPP"].values
-passport = ds.close()
-print(passport["passport_pid"])   # "hdl:11676/..."
+info = ds.close()
+print(info["passport_pid"])    # "hdl:11676/..."
+print(info["queries"])         # recorded selection steps
 ```
 
-`ICOSDataset` delegates all attribute and item access to the underlying
-`xr.Dataset`, so it is a drop-in replacement.  A `__del__` safety net
-fires the close if the user never calls it explicitly.
+A `__del__` safety net fires the close if the user never calls it
+explicitly (e.g. script exits without using a context manager).
 
 `open_zarr` options:
 
@@ -219,44 +228,37 @@ fires the close if the user never calls it explicitly.
 | `verbose` | `True` | Print PID and landing page on close |
 | `**xr_kwargs` | — | Forwarded to `xr.open_zarr()` |
 
-Advanced users can still call the proxy endpoints directly:
+**Proxy HTTP endpoints**
 
-Clients connect with standard xarray/zarr and receive their passport PID
-by calling `POST /session/close` when done:
+| Endpoint | Description |
+|---|---|
+| `GET /{key}` | Serve zarr key (metadata or chunk); chunks are tracked |
+| `POST /session/close` | Close session, mint passport synchronously, return PID |
+| `GET /session/passport` | Retrieve PID for current/last session (polling fallback) |
 
-```python
-import xarray as xr, requests
+`POST /session/close` accepts an optional JSON body
+`{"queries": [...]}` (sent automatically by `icos_zarr`) and returns:
 
-ds = xr.open_zarr("http://localhost:8000/", group="SE-Svb", consolidated=True)
-nee = ds["NEE"].isel(time=slice(0, 100)).values   # triggers chunk fetches
-
-# Close session and receive the Handle PID synchronously
-r = requests.post("http://localhost:8000/session/close")
-print(r.json())
-# {
-#   "passport_pid":  "hdl:11676/3f2a1b9c-...",
-#   "passport_url":  "https://meta.icos-cp.eu/objects/...",
-#   "chunks":        134,
-#   "bytes_served":  1851103,
-#   "arrays":        ["GPP", "NEE", "TA", ...]
-# }
+```json
+{
+  "passport_pid":  "hdl:11676/3f2a1b9c-...",
+  "passport_url":  "https://meta.icos-cp.eu/objects/...",
+  "chunks":        134,
+  "bytes_served":  1851103,
+  "arrays":        ["NEE", "TA_F", "time", ...],
+  "queries":       [...]
+}
 ```
 
 If the client never calls `/session/close`, the idle-timeout reaper
-(default 5 min) mints the passport automatically.  The PID can be
-retrieved afterwards with:
-
-```python
-r = requests.get("http://localhost:8000/session/passport")
-print(r.json()["passport_pid"])   # "hdl:11676/..." or "" if still pending
-```
+(default 5 min) mints the passport automatically.
 
 **Configuration** (environment variables):
 
 | Variable | Default | Description |
 |---|---|---|
 | `ZARR_STORE_PATH` | `icos-fluxnet.zarr` | Local zarr store to serve |
-| `SESSION_TIMEOUT_SEC` | `300` | Idle seconds before session closes and passport is minted |
+| `SESSION_TIMEOUT_SEC` | `300` | Idle seconds before session closes automatically |
 | `HANDLE_PREFIX` | `11676` | EPIC Handle prefix |
 | `HANDLE_ENDPOINT` | `https://epic5.storage.surfsara.nl/api/handles` | Handle REST API |
 | `HANDLE_TOKEN` | — | Bearer token for Handle minting |
@@ -272,12 +274,14 @@ print(r.json()["passport_pid"])   # "hdl:11676/..." or "" if still pending
 
 **Module layout:**
 
-| Module | Responsibility |
+| File | Responsibility |
 |---|---|
-| `zarr_proxy/main.py` | FastAPI app, zarr key router, session hook |
+| `run_proxy.py` | CLI launcher (`--host`, `--port`, `--store`) |
+| `icos_zarr.py` | Client wrapper: `open_zarr()`, `ICOSDataset`, `_TrackedArray` |
+| `zarr_proxy/main.py` | FastAPI app, zarr key router, `/session/close`, `/session/passport` |
 | `zarr_proxy/session.py` | IP-based session accumulator, idle-timeout reaper |
 | `zarr_proxy/passport.py` | ROCrate JSON-LD builder, SHA-256 checksums |
-| `zarr_proxy/handle_client.py` | EPIC Handle PID minting |
+| `zarr_proxy/handle_client.py` | EPIC Handle PID minting and updating |
 | `zarr_proxy/cp_client.py` | ICOS CP metadata upload via CPauth |
 | `zarr_proxy/matomo_client.py` | Server-side Matomo tracking event |
 | `zarr_proxy/config.py` | All configuration with env-var overrides |
@@ -294,16 +298,12 @@ print(r.json()["passport_pid"])   # "hdl:11676/..." or "" if still pending
     {
       "@id": "./",
       "@type": "Dataset",
-      "hasPart": [
-        {"@id": "SE-Svb/NEE"},
-        {"@id": "SE-Svb/fluxnet_dd/NEE"},
-        {"@id": "SE-Svb/fluxnet_dd/GPP"}
-      ]
+      "hasPart": [{"@id": "SE-Svb/NEE"}, {"@id": "SE-Svb/TA_F"}]
     },
     {
       "@id": "hdl:11676/3f2a1b9c-7e4d-4a2f-8c1e-9d5f6a7b8c9d",
       "@type": ["Dataset", "icos:DataPassport"],
-      "name": "Data access passport — GPP, NEE (2026-04-16)",
+      "name": "Data access passport — NEE, TA_F (2026-04-16)",
       "url": "https://meta.icos-cp.eu/objects/passport_3f2a1b9c",
       "dateAccessed": "2026-04-16T21:00:00Z",
       "sessionStart": "2026-04-16T21:00:00Z",
@@ -312,8 +312,16 @@ print(r.json()["passport_pid"])   # "hdl:11676/..." or "" if still pending
         "@type": "Agent",
         "ipAnonymised": "192.168.1.0/24"
       },
-      "accessedGroups": ["SE-Svb", "SE-Svb/fluxnet_dd"],
-      "accessedArrays": ["GPP", "NEE"],
+      "accessedGroups": ["SE-Svb"],
+      "accessedArrays": ["NEE", "TA_F"],
+      "query": [
+        {"variable": "NEE", "group": "SE-Svb"},
+        {"variable": "NEE", "group": "SE-Svb",
+         "sel": {"ustar_threshold": "VUT", "nee_variant": "REF"}},
+        {"variable": "NEE", "group": "SE-Svb",
+         "isel": {"time": {"start": 0, "stop": 100, "step": null}}},
+        {"variable": "TA_F", "group": "SE-Svb"}
+      ],
       "hasPart": [
         {
           "@id": "SE-Svb/NEE",
@@ -324,24 +332,16 @@ print(r.json()["passport_pid"])   # "hdl:11676/..." or "" if still pending
           "chunkCount": 3
         },
         {
-          "@id": "SE-Svb/fluxnet_dd/NEE",
-          "name": "NEE",
-          "zarr_path": "SE-Svb/fluxnet_dd/NEE",
+          "@id": "SE-Svb/TA_F",
+          "name": "TA_F",
+          "zarr_path": "SE-Svb/TA_F",
           "sha256": "effc3f966be6fde17d0d1b61f52f9a5b7fa35472e08861e7b3f42353a513affb",
-          "sizeInBytes": 2048,
-          "chunkCount": 1
-        },
-        {
-          "@id": "SE-Svb/fluxnet_dd/GPP",
-          "name": "GPP",
-          "zarr_path": "SE-Svb/fluxnet_dd/GPP",
-          "sha256": "699a388cd2470da2dc0d145a3b0d078f64350db78a7845cc0b5a4c71083a9d87",
-          "sizeInBytes": 2048,
+          "sizeInBytes": 4096,
           "chunkCount": 1
         }
       ],
       "totalBytesServed": 16384,
-      "totalChunks": 5,
+      "totalChunks": 4,
       "isPartOf": {"@id": "https://doi.org/10.18160/R3G6-Z8ZH"},
       "citation": "Peichl et al. (2025). ETC L2 ARCHIVE from Svartberget …",
       "passportSha256": "fed285a18bddad4712bc1a86002fb20fd5ea9c39ba50e2eebe47a965d378c9c3"
@@ -350,14 +350,15 @@ print(r.json()["passport_pid"])   # "hdl:11676/..." or "" if still pending
 }
 ```
 
-Key fields:
+Key passport fields:
 
 | Field | Description |
 |---|---|
-| `@id` | Handle PID minted for this passport |
+| `@id` | Handle PID minted for this passport (`hdl:11676/…`) |
 | `url` | ICOS CP landing page for the passport |
-| `agent.ipAnonymised` | Caller IP anonymised to /24 (IPv4) or /48 (IPv6) |
-| `hasPart[].sha256` | SHA-256 of sorted chunk digests for each accessed array |
+| `agent.ipAnonymised` | Caller IP anonymised to /24 (IPv4) or /48 (IPv6); full IP logged server-side and sent to Matomo |
+| `query` | Ordered list of xarray variable accesses and `.sel()`/`.isel()` selections made by the client |
+| `hasPart[].sha256` | SHA-256 of sorted chunk digests for each delivered array |
 | `passportSha256` | SHA-256 of the complete passport JSON (with this field set to `null`) — guarantees self-describing integrity |
 
 ---
