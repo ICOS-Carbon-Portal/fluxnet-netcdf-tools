@@ -307,12 +307,10 @@ def main() -> None:
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
-        "--store", default="icos-fluxnet.zarr", metavar="DIR",
-        help="Zarr store directory",
-    )
-
     sub = parser.add_subparsers(dest="command")
+
+    # Shared --store argument added to every subparser
+    _store_kw = dict(default="icos-fluxnet.zarr", metavar="DIR", help="Zarr store directory")
 
     # ── populate (default when first arg looks like a DOI) ────────────────────
     p_pop = sub.add_parser(
@@ -321,6 +319,7 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p_pop.add_argument("doi", help="ICOS collection DOI (e.g. 10.18160/R3G6-Z8ZH)")
+    p_pop.add_argument("--store", **_store_kw)
     p_pop.add_argument("--station", nargs="+", default=[], metavar="ID",
                        help="Process only these station IDs; default: all")
     p_pop.add_argument("--outdir", default=".", type=Path, metavar="DIR",
@@ -335,14 +334,17 @@ def main() -> None:
     # ── remove ────────────────────────────────────────────────────────────────
     p_rem = sub.add_parser("remove", help="Remove a station from the store")
     p_rem.add_argument("site_id", help="Station ID, e.g. SE-Svb")
+    p_rem.add_argument("--store", **_store_kw)
 
     # ── list ──────────────────────────────────────────────────────────────────
-    sub.add_parser("list", help="List all stations in the store",
-                   formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p_lst = sub.add_parser("list", help="List all stations in the store",
+                           formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p_lst.add_argument("--store", **_store_kw)
 
     # ── info ──────────────────────────────────────────────────────────────────
     p_inf = sub.add_parser("info", help="Show provenance for a station")
     p_inf.add_argument("site_id", help="Station ID, e.g. SE-Svb")
+    p_inf.add_argument("--store", **_store_kw)
 
     # ── Smart default: treat first arg as DOI if no sub-command given ─────────
     argv = sys.argv[1:]
