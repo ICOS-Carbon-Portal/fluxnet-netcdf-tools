@@ -116,15 +116,22 @@ class ICOSDataset:
         be_verbose = self._verbose if verbose is None else verbose
 
         if be_verbose:
-            pid = info.get("passport_pid", "")
-            url = info.get("passport_url", "")
-            if pid:
-                print(f"Passport minted : {pid}")
-            if url:
-                print(f"Landing page    : {url}")
-            if not pid and not url:
+            pid    = info.get("passport_pid", "")
+            url    = info.get("passport_url", "")
+            chunks = info.get("chunks", 0)
+            if chunks == 0:
                 print(
-                    f"[icos_zarr] Session closed ({info.get('chunks', 0)} chunks) "
+                    "[icos_zarr] Warning: session closed with 0 chunks — no data was "
+                    "read from the store. The passport covers only what was actually "
+                    "delivered; lazy arrays that were never computed are not included."
+                )
+            elif pid:
+                print(f"Passport minted : {pid}")
+                if url:
+                    print(f"Landing page    : {url}")
+            else:
+                print(
+                    f"[icos_zarr] Session closed ({chunks} chunks) "
                     f"— Handle/CP not configured, no PID minted."
                 )
 
@@ -190,15 +197,21 @@ def open_zarr(
 
     Examples
     --------
-    # Context manager — passport minted automatically on exit
+    # Context manager — passport covers exactly what was fetched inside the block.
+    # Lazy arrays that were never computed are NOT included (passport = delivered data).
     with open_zarr("http://localhost:8000/", group="SE-Svb") as ds:
-        nee = ds["NEE"].isel(time=slice(0, 100)).values
+        nee = ds["NEE"].isel(time=slice(0, 100)).values   # fetched → in passport
+        lazy = ds["GPP"].isel(time=0)                     # never computed → not in passport
 
-    # Explicit close — useful in scripts / notebooks
+    # Explicit close — passport covers chunks fetched before close() is called.
     ds = open_zarr("http://localhost:8000/", group="SE-Svb")
-    nee = ds["NEE"].values
+    nee = ds["NEE"].values   # triggers chunk fetches
     passport = ds.close()
     print(passport["passport_pid"])
+
+    # Coordinate/metadata-only access is tracked automatically:
+    with open_zarr("http://localhost:8000/", group="SE-Svb") as ds:
+        t = ds["time"].values   # fetches time chunks — recorded in passport
     """
     xr_kwargs.setdefault("consolidated", True)
     url = proxy_url.rstrip("/")
