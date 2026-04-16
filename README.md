@@ -170,7 +170,7 @@ print(ds["NEE"])   # DataArray(time, ustar_threshold, nee_variant)
 
 ---
 
-### `run_proxy.py` + `icos_zarr.py` — zarr data passport proxy
+### `run_proxy.py` + `datapassport_zarr.py` — zarr data passport proxy
 
 Serves `icos-fluxnet.zarr` as a standard zarr v2 HTTP store and
 automatically generates a **data passport** for every client session.
@@ -187,15 +187,15 @@ python run_proxy.py [--host HOST] [--port PORT] [--store DIR]
    the passport to the ICOS Carbon Portal, and fires a Matomo usage event.
 3. The client receives the Handle PID synchronously via `POST /session/close`.
 
-**Recommended client — `icos_zarr.open_zarr()`**
+**Recommended client — `datapassport_zarr.open_zarr()`**
 
-`ICOSDataset` wraps `xr.Dataset` and is a drop-in replacement.
+`DataPassportDataset` wraps `xr.Dataset` and is a drop-in replacement.
 It records every `.sel()` / `.isel()` call as the query log and sends it
 to the proxy on close.  Passport covers only the data actually delivered
 (lazy arrays that were never computed are not included).
 
 ```python
-from icos_zarr import open_zarr
+from datapassport_zarr import open_zarr
 
 # Context manager — passport minted automatically on __exit__
 with open_zarr("http://localhost:8000/", group="SE-Svb") as ds:
@@ -237,7 +237,7 @@ explicitly (e.g. script exits without using a context manager).
 | `GET /session/passport` | Retrieve PID for current/last session (polling fallback) |
 
 `POST /session/close` accepts an optional JSON body
-`{"queries": [...]}` (sent automatically by `icos_zarr`) and returns:
+`{"queries": [...]}` (sent automatically by `datapassport_zarr`) and returns:
 
 ```json
 {
@@ -277,7 +277,7 @@ If the client never calls `/session/close`, the idle-timeout reaper
 | File | Responsibility |
 |---|---|
 | `run_proxy.py` | CLI launcher (`--host`, `--port`, `--store`) |
-| `icos_zarr.py` | Client wrapper: `open_zarr()`, `ICOSDataset`, `_TrackedArray` |
+| `datapassport_zarr.py` | Client wrapper: `open_zarr()`, `DataPassportDataset`, `_TrackedArray` |
 | `zarr_proxy/main.py` | FastAPI app, zarr key router, `/session/close`, `/session/passport` |
 | `zarr_proxy/session.py` | IP-based session accumulator, idle-timeout reaper |
 | `zarr_proxy/passport.py` | ROCrate JSON-LD builder, SHA-256 checksums |

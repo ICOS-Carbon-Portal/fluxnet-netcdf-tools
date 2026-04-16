@@ -1,0 +1,99 @@
+{
+  "@context": [
+    "https://w3id.org/ro/crate/1.1/context",
+    {"icos": "https://meta.icos-cp.eu/ontology/cpmeta/"}
+  ],
+  "@graph": [
+    {
+      "@id": "./",
+      "@type": "Dataset",
+      "hasPart": [
+        {"@id": "SE-Svb/NEE"},
+        {"@id": "SE-Svb/GPP"},
+        {"@id": "SE-Svb/RECO"},
+        {"@id": "SE-Svb/fluxnet_dd/TA"},
+        {"@id": "SE-Svb/fluxnet_dd/VPD"}
+      ]
+    },
+    {
+      "@id": "hdl:11676/3f2a1b9c-e847-4d51-a2f3-7c890d12ef44",
+      "@type": ["Dataset", "icos:DataPassport"],
+      "name": "Data access passport — GPP, NEE, RECO, TA, VPD (2026-04-16)",
+      "url": "https://meta.icos-cp.eu/objects/b4e9f2a1c73d085e",
+      "dateAccessed": "2026-04-16T14:23:07Z",
+      "sessionStart": "2026-04-16T14:23:07Z",
+      "sessionEnd":   "2026-04-16T14:23:19Z",
+      "agent": {
+        "@type": "Agent",
+        "ipAnonymised": "192.168.1.0/24"
+      },
+      "accessedGroups": [
+        "SE-Svb",
+        "SE-Svb/fluxnet_dd"
+      ],
+      "accessedArrays": [
+        "GPP",
+        "NEE",
+        "RECO",
+        "TA",
+        "VPD"
+      ],
+      "query": [
+        {"variable": "NEE",  "group": "SE-Svb"},
+        {"variable": "NEE",  "group": "SE-Svb",  "isel": {"time": {"start": 0, "stop": 17520, "step": null}}},
+        {"variable": "GPP",  "group": "SE-Svb"},
+        {"variable": "GPP",  "group": "SE-Svb",  "sel":  {"time": {"start": "2023-01-01", "stop": "2023-12-31", "step": null}, "ustar_threshold": "median"}},
+        {"variable": "RECO", "group": "SE-Svb"},
+        {"variable": "TA",   "group": "SE-Svb/fluxnet_dd"},
+        {"variable": "VPD",  "group": "SE-Svb/fluxnet_dd"}
+      ],
+      "hasPart": [
+        {
+          "@id":         "SE-Svb/NEE",
+          "name":        "NEE",
+          "zarr_path":   "SE-Svb/NEE",
+          "sha256":      "a3f1c82ed5b097341fc82e9d4b1200719d0e53f2c847b631f9e40d8bd94b0071",
+          "sizeInBytes": 49152,
+          "chunkCount":  12
+        },
+        {
+          "@id":         "SE-Svb/GPP",
+          "name":        "GPP",
+          "zarr_path":   "SE-Svb/GPP",
+          "sha256":      "8bc7e5411a3d092f4e7b6c28d5f0193e7a42c851d96f3b074e2a8d102a3f19cc",
+          "sizeInBytes": 36864,
+          "chunkCount":  9
+        },
+        {
+          "@id":         "SE-Svb/RECO",
+          "name":        "RECO",
+          "zarr_path":   "SE-Svb/RECO",
+          "sha256":      "f20d4a179c3e8b2d1a5f7e041c9b3d82f6e50a4c718d2b93e467f1a0bb91e340",
+          "sizeInBytes": 36864,
+          "chunkCount":  9
+        },
+        {
+          "@id":         "SE-Svb/fluxnet_dd/TA",
+          "name":        "TA",
+          "zarr_path":   "SE-Svb/fluxnet_dd/TA",
+          "sha256":      "1e7a903df2c8b4a61d39e075f8b2c94a3d1f7e52b8c06d4a2f9e31b06c428f85",
+          "sizeInBytes": 32768,
+          "chunkCount":  8
+        },
+        {
+          "@id":         "SE-Svb/fluxnet_dd/VPD",
+          "name":        "VPD",
+          "zarr_path":   "SE-Svb/fluxnet_dd/VPD",
+          "sha256":      "c5d82b0f4e1a7c39d2b08f5a6e3c17d4b9f2e80a5c4d1b7e93f206a843e17a92",
+          "sizeInBytes": 27648,
+          "chunkCount":  9
+        }
+      ],
+      "totalBytesServed": 183296,
+      "totalChunks": 47,
+      "isPartOf": {"@id": "https://hdl.handle.net/11676/R3G6-Z8ZH"},
+      "citation": "Linder, S. et al. (2024). ICOS Ecosystem Station, Svartberget (SE-Svb), Fluxnet Archive, 2024-01-01–2024-12-31. ICOS RI. https://doi.org/10.18160/R3G6-Z8ZH",
+      "passportSha256": "b4e9f2a1c73d085e6f1429b3c8d7e05a4f2b1c9e3d8a7f6b2c4e1d9a5f3b8c0"
+    }
+  ]
+}

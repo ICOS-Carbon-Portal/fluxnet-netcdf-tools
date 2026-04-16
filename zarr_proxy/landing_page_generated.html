@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Data access passport — GPP, NEE, RECO, TA, VPD (2026-04-16)</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", Arial, sans-serif;
+      font-size: 15px; color: #1a1a2e; background: #f5f7fa; padding: 2rem 1rem;
+    }
+    .container { max-width: 860px; margin: 0 auto; }
+    .header {
+      background: #00558b; color: #fff; border-radius: 8px 8px 0 0;
+      padding: 1.5rem 2rem; display: flex; align-items: center; gap: 1rem;
+    }
+    .header h1 { font-size: 1.2rem; font-weight: 600; line-height: 1.4; }
+    .header .subtitle { font-size: 0.85rem; opacity: 0.8; margin-top: 0.2rem; }
+    .pid-bar {
+      background: #003f6b; color: #7ecfff; padding: 0.6rem 2rem;
+      font-size: 0.85rem; font-family: monospace;
+      display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+    }
+    .pid-bar a { color: #7ecfff; }
+    .pid-label { opacity: 0.7; font-family: inherit; }
+    .card {
+      background: #fff; border: 1px solid #dde3ec; border-top: none; padding: 1.5rem 2rem;
+    }
+    .card + .card { border-top: 1px solid #dde3ec; }
+    .card:last-child { border-radius: 0 0 8px 8px; }
+    .section-title {
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em;
+      text-transform: uppercase; color: #00558b; margin-bottom: 0.9rem;
+    }
+    .kv { display: grid; grid-template-columns: 180px 1fr; row-gap: 0.45rem; }
+    .kv dt { color: #555; font-size: 0.88rem; }
+    .kv dd { font-size: 0.88rem; word-break: break-word; }
+    .kv dd a { color: #00558b; }
+    .chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+    .chip {
+      display: inline-block; background: #e8f4ff; color: #00558b;
+      border: 1px solid #b0d8f5; border-radius: 4px;
+      padding: 0.2rem 0.55rem; font-size: 0.8rem; font-family: monospace;
+    }
+    .query-list { list-style: none; }
+    .query-list li {
+      background: #f8fafc; border: 1px solid #dde3ec; border-radius: 4px;
+      padding: 0.55rem 0.8rem; margin-bottom: 0.4rem;
+      font-family: monospace; font-size: 0.82rem; color: #2d3a4a;
+    }
+    .query-list .q-num { display: inline-block; width: 1.6rem; color: #999; }
+    .q-kw { color: #00558b; font-weight: 600; }
+    .q-val { color: #c0392b; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    thead th {
+      text-align: left; padding: 0.5rem 0.7rem; background: #f0f4f8;
+      border-bottom: 2px solid #dde3ec; font-weight: 600; color: #444;
+    }
+    tbody tr:nth-child(even) td { background: #fafbfd; }
+    tbody td { padding: 0.45rem 0.7rem; border-bottom: 1px solid #edf0f5; }
+    .mono { font-family: monospace; }
+    .integrity {
+      background: #f0f4f8; border: 1px solid #dde3ec; border-radius: 6px;
+      padding: 1rem 1.2rem;
+    }
+    .integrity .hash {
+      font-family: monospace; font-size: 0.82rem;
+      word-break: break-all; color: #2d3a4a; margin-top: 0.4rem;
+    }
+    .integrity .verify-note { font-size: 0.78rem; color: #777; margin-top: 0.5rem; }
+    code {
+      background: #e8ecf2; padding: 0.05rem 0.3rem; border-radius: 3px;
+      font-family: monospace; font-size: 0.85em;
+    }
+    .footer { margin-top: 1.5rem; text-align: center; font-size: 0.78rem; color: #999; }
+    .footer a { color: #00558b; }
+    .dl-btn {
+      background: #00558b; color: #fff; padding: 0.5rem 1.1rem;
+      border-radius: 5px; text-decoration: none; font-size: 0.88rem; white-space: nowrap;
+    }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <div class="header">
+    <svg width="36" height="36" viewBox="0 0 36 36" fill="none"
+     xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <circle cx="18" cy="18" r="18" fill="#ffffff22"/>
+  <path d="M10 26 L18 10 L26 26 Z" stroke="#fff" stroke-width="2"
+        fill="none" stroke-linejoin="round"/>
+  <circle cx="18" cy="21" r="2" fill="#7ecfff"/>
+</svg>
+    <div>
+      <h1>Data access passport — GPP, NEE, RECO, TA, VPD (2026-04-16)</h1>
+      <div class="subtitle">ICOS Carbon Portal · Fluxnet data delivery record · 2026-04-16</div>
+    </div>
+  </div>
+
+  <div class="pid-bar">
+    <span class="pid-label">Handle PID</span>
+    <a href="https://hdl.handle.net/11676/3f2a1b9c-e847-4d51-a2f3-7c890d12ef44">hdl:11676/3f2a1b9c-e847-4d51-a2f3-7c890d12ef44</a>
+  </div>
+
+  <div class="card">
+    <p class="section-title">Session summary</p>
+    <dl class="kv">
+      <dt>Source dataset</dt><dd><a href="https://hdl.handle.net/11676/R3G6-Z8ZH">https://hdl.handle.net/11676/R3G6-Z8ZH</a></dd>
+      <dt>Citation</dt><dd>Linder, S. et al. (2024). ICOS Ecosystem Station, Svartberget (SE-Svb), Fluxnet Archive, 2024-01-01–2024-12-31. ICOS RI. https://doi.org/10.18160/R3G6-Z8ZH</dd>
+      <dt>Session start</dt><dd>2026-04-16T14:23:07Z</dd>
+      <dt>Session end</dt><dd>2026-04-16T14:23:19Z</dd>
+      <dt>Client (anonymised)</dt><dd class="mono">192.168.1.0/24</dd>
+      <dt>Chunks delivered</dt><dd>47</dd>
+      <dt>Bytes delivered</dt><dd>183.3 KB (183,296 bytes)</dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <p class="section-title">Variables accessed</p>
+    <div class="chips"><span class="chip">GPP</span><span class="chip">NEE</span><span class="chip">RECO</span><span class="chip">TA</span><span class="chip">VPD</span></div>
+    <p style="margin-top:1.1rem;" class="section-title">Groups accessed</p>
+    <div class="chips"><span class="chip">SE-Svb</span><span class="chip">SE-Svb/fluxnet_dd</span></div>
+  </div>
+
+  <div class="card"><p class="section-title">Query chain (recorded client-side)</p><ul class="query-list"><li><span class="q-num">1</span> <span class="q-kw">ds</span>[<span class="q-val">"NEE"</span>]&nbsp;·&nbsp; group <span class="mono">SE-Svb</span>&nbsp;<span style="color:#999; font-size:0.78rem;">(no further indexing — full array fetched)</span></li><li><span class="q-num">2</span> <span class="q-kw">ds</span>[<span class="q-val">"NEE"</span>]&nbsp;·&nbsp; group <span class="mono">SE-Svb</span>&nbsp;<span class="q-kw">.isel</span>(time=<span class="q-val">slice(0, 17520)</span>)</li><li><span class="q-num">3</span> <span class="q-kw">ds</span>[<span class="q-val">"GPP"</span>]&nbsp;·&nbsp; group <span class="mono">SE-Svb</span>&nbsp;<span style="color:#999; font-size:0.78rem;">(no further indexing — full array fetched)</span></li><li><span class="q-num">4</span> <span class="q-kw">ds</span>[<span class="q-val">"GPP"</span>]&nbsp;·&nbsp; group <span class="mono">SE-Svb</span>&nbsp;<span class="q-kw">.sel</span>(time=<span class="q-val">slice(2023-01-01, 2023-12-31)</span>, ustar_threshold=<span class="q-val">"median"</span>)</li><li><span class="q-num">5</span> <span class="q-kw">ds</span>[<span class="q-val">"RECO"</span>]&nbsp;·&nbsp; group <span class="mono">SE-Svb</span>&nbsp;<span style="color:#999; font-size:0.78rem;">(no further indexing — full array fetched)</span></li><li><span class="q-num">6</span> <span class="q-kw">ds</span>[<span class="q-val">"TA"</span>]&nbsp;·&nbsp; group <span class="mono">SE-Svb/fluxnet_dd</span>&nbsp;<span style="color:#999; font-size:0.78rem;">(no further indexing — full array fetched)</span></li><li><span class="q-num">7</span> <span class="q-kw">ds</span>[<span class="q-val">"VPD"</span>]&nbsp;·&nbsp; group <span class="mono">SE-Svb/fluxnet_dd</span>&nbsp;<span style="color:#999; font-size:0.78rem;">(no further indexing — full array fetched)</span></li></ul></div>
+
+  <div class="card">
+    <p class="section-title">Delivered data — per-variable checksums</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Variable (zarr path)</th><th>Chunks</th>
+          <th>Bytes</th><th>SHA-256 (aggregate)</th>
+        </tr>
+      </thead>
+      <tbody><tr><td class="mono">SE-Svb/NEE</td><td>12</td><td>49,152</td><td class="mono" style="font-size:0.78rem;color:#666;">a3f1c82ed5b09734…d94b0071</td></tr><tr><td class="mono">SE-Svb/GPP</td><td>9</td><td>36,864</td><td class="mono" style="font-size:0.78rem;color:#666;">8bc7e5411a3d092f…2a3f19cc</td></tr><tr><td class="mono">SE-Svb/RECO</td><td>9</td><td>36,864</td><td class="mono" style="font-size:0.78rem;color:#666;">f20d4a179c3e8b2d…bb91e340</td></tr><tr><td class="mono">SE-Svb/fluxnet_dd/TA</td><td>8</td><td>32,768</td><td class="mono" style="font-size:0.78rem;color:#666;">1e7a903df2c8b4a6…6c428f85</td></tr><tr><td class="mono">SE-Svb/fluxnet_dd/VPD</td><td>9</td><td>27,648</td><td class="mono" style="font-size:0.78rem;color:#666;">c5d82b0f4e1a7c39…43e17a92</td></tr></tbody>
+    </table>
+    <p style="font-size:0.78rem;color:#777;margin-top:0.6rem;">
+      Aggregate SHA-256 = SHA-256 of the sorted list of individual chunk digests.
+    </p>
+  </div>
+
+  <div class="card">
+    <p class="section-title">Passport integrity</p>
+    <div class="integrity">
+      <div>Passport SHA-256</div>
+      <div class="hash">b4e9f2a1c73d085e6f1429b3c8d7e05a4f2b1c9e3d8a7f6b2c4e1d9a5f3b8c0</div>
+      <div class="verify-note">
+        Computed over the canonical JSON-LD (<code>sort_keys=True</code>, no whitespace)
+        with <code>"passportSha256": null</code>. To verify: set that field to
+        <code>null</code>, re-serialise with the same settings, and compare the
+        SHA-256 to the value above.
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
+    <div>
+      <p class="section-title" style="margin-bottom:0.2rem;">Machine-readable passport</p>
+      <p style="font-size:0.85rem;color:#555;">
+        Full ROCrate JSON-LD document — cite this PID in your methods section.
+      </p>
+    </div>
+    <a href="landing_page_example.jsonld" class="dl-btn" style="margin-left:auto;">
+      Download .jsonld
+    </a>
+  </div>
+
+</div>
+
+<div class="footer">
+  <a href="https://www.icos-cp.eu/">ICOS Carbon Portal</a> ·
+  Passport generated 2026-04-16T14:23:19Z ·
+  <a href="https://w3id.org/ro/crate/1.1">ROCrate 1.1</a>
+</div>
+</body>
+</html>

@@ -108,7 +108,7 @@ async def close_session(request: Request) -> JSONResponse:
     """
     Explicitly close the caller's session and synchronously mint a passport.
     Accepts an optional JSON body {"queries": [...]} with xarray selection
-    steps recorded client-side by icos_zarr.open_zarr().
+    steps recorded client-side by datapassport_zarr.open_zarr().
     Returns {"passport_pid": "hdl:11676/...", "passport_url": "https://..."}.
     If the session has no chunks (nothing was read), returns an empty result.
     """
@@ -200,4 +200,10 @@ async def serve_zarr_key(key: str, request: Request) -> Response:
 
     # Everything else is a chunk — track it
     session.record(ip, key, data)
-    return Response(content=data, media_type="application/octet-stream")
+    headers = {}
+    if not request.headers.get("X-DataPassport-Client"):
+        headers["X-DataPassport-Warning"] = (
+            "Install datapassport_zarr and use datapassport_zarr.open_zarr() "
+            "to receive your data passport PID automatically."
+        )
+    return Response(content=data, media_type="application/octet-stream", headers=headers)

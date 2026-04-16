@@ -1,9 +1,9 @@
 """
-icos_zarr — thin xarray/zarr wrapper for the ICOS zarr data passport proxy.
+datapassport_zarr — thin xarray/zarr wrapper for the zarr data passport proxy.
 
 Usage
 -----
-    from icos_zarr import open_zarr
+    from datapassport_zarr import open_zarr
 
     with open_zarr("http://localhost:8000/", group="SE-Svb") as ds:
         nee = ds["NEE"].isel(time=slice(0, 100)).values
@@ -28,9 +28,9 @@ from typing import Any
 import xarray as xr
 
 
-class ICOSDataset:
+class DataPassportDataset:
     """
-    Wraps an xr.Dataset opened from an ICOS zarr proxy server.
+    Wraps an xr.Dataset opened from an zarr proxy server that produces a DataPassport
     Delegates all attribute access to the underlying dataset, so it behaves
     exactly like xr.Dataset in user code.  Calls POST /session/close on exit.
     Records xarray selections (.sel / .isel / __getitem__) as the query log
@@ -57,7 +57,7 @@ class ICOSDataset:
 
     # ── Context manager ───────────────────────────────────────────────────────
 
-    def __enter__(self) -> "ICOSDataset":
+    def __enter__(self) -> "DataPassportDataset":
         return self
 
     def __exit__(self, *_) -> None:
@@ -109,15 +109,15 @@ class ICOSDataset:
                 f"{self._proxy_url}/session/close",
                 data=body,
                 method="POST",
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", "X-DataPassport-Client": "datapassport_zarr"},
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 info = json.loads(resp.read())
         except urllib.error.URLError as exc:
-            _print(f"[icos_zarr] Could not reach proxy to close session: {exc}")
+            _print(f"[datapassport_zarr] Could not reach proxy to close session: {exc}")
             return {}
         except Exception as exc:
-            _print(f"[icos_zarr] Session close failed: {exc}")
+            _print(f"[datapassport_zarr] Session close failed: {exc}")
             return {}
 
         self._passport = info
@@ -129,7 +129,7 @@ class ICOSDataset:
             chunks = info.get("chunks", 0)
             if chunks == 0:
                 print(
-                    "[icos_zarr] Warning: session closed with 0 chunks — no data was "
+                    "[datapassport_zarr] Warning: session closed with 0 chunks — no data was "
                     "read from the store. The passport covers only what was actually "
                     "delivered; lazy arrays that were never computed are not included."
                 )
@@ -139,7 +139,7 @@ class ICOSDataset:
                     print(f"Landing page    : {url}")
             else:
                 print(
-                    f"[icos_zarr] Session closed ({chunks} chunks) "
+                    f"[datapassport_zarr] Session closed ({chunks} chunks) "
                     f"— Handle/CP not configured, no PID minted."
                 )
 
@@ -159,7 +159,7 @@ class ICOSDataset:
             if self._verbose:
                 print(f"Saved to        : {path}")
         except Exception as exc:
-            _print(f"[icos_zarr] Could not save passport: {exc}")
+            _print(f"[datapassport_zarr] Could not save passport: {exc}")
 
 
 def _print(msg: str) -> None:
@@ -169,7 +169,7 @@ def _print(msg: str) -> None:
 class _TrackedArray:
     """
     Thin wrapper around xr.DataArray that records .sel() and .isel() calls
-    into the parent ICOSDataset query log, then delegates everything else.
+    into the parent DataPassportDataset query log, then delegates everything else.
     """
 
     def __init__(
@@ -244,9 +244,9 @@ def open_zarr(
     passport_dir: str = ".passport",
     verbose: bool = True,
     **xr_kwargs,
-) -> ICOSDataset:
+) -> DataPassportDataset:
     """
-    Open a zarr group from an ICOS zarr proxy server.
+    Open a zarr group from an DataPassport zarr proxy server.
 
     Parameters
     ----------
@@ -268,7 +268,7 @@ def open_zarr(
 
     Returns
     -------
-    ICOSDataset
+    DataPassportDataset
         Wraps xr.Dataset; use as a context manager or call .close() manually.
 
     Examples
@@ -290,9 +290,11 @@ def open_zarr(
         t = ds["time"].values   # fetches time chunks — recorded in passport
     """
     xr_kwargs.setdefault("consolidated", True)
+    so = xr_kwargs.pop("storage_options", {})
+    so.setdefault("headers", {})["X-DataPassport-Client"] = "datapassport_zarr"
     url = proxy_url.rstrip("/")
-    ds  = xr.open_zarr(url + "/", group=group or None, **xr_kwargs)
-    return ICOSDataset(
+    ds  = xr.open_zarr(url + "/", group=group or None, storage_options=so, **xr_kwargs)
+    return DataPassportDataset(
         ds,
         proxy_url=url,
         group=group,
