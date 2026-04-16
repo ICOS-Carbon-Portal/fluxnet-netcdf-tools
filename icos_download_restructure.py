@@ -278,21 +278,25 @@ def main() -> None:
         print(f"\n{'─'*60}")
         print(f"Station {site_id}")
 
-        # ── Download ─────────────────────────────────────────────────────────
-        download_ok = False
-        for attempt in (1, 2):
-            try:
-                download_zip(arch["hash_id"], zip_path, label=site_id)
-                download_ok = True
-                break
-            except Exception as exc:
-                if attempt == 1:
-                    print(f"  WARNING: download failed ({exc}); retrying in 30 s …")
-                    time.sleep(30)
-                else:
-                    print(f"  ERROR: download failed twice: {exc}")
-                    failed.append((site_id, f"download: {exc}"))
-                    zip_path.unlink(missing_ok=True)
+        # ── Download (skip if already cached) ────────────────────────────────
+        if zip_path.exists() and zip_path.stat().st_size > 0:
+            print(f"  Using cached {zip_path.name}")
+            download_ok = True
+        else:
+            download_ok = False
+            for attempt in (1, 2):
+                try:
+                    download_zip(arch["hash_id"], zip_path, label=site_id)
+                    download_ok = True
+                    break
+                except Exception as exc:
+                    if attempt == 1:
+                        print(f"  WARNING: download failed ({exc}); retrying in 30 s …")
+                        time.sleep(30)
+                    else:
+                        print(f"  ERROR: download failed twice: {exc}")
+                        failed.append((site_id, f"download: {exc}"))
+                        zip_path.unlink(missing_ok=True)
         if not download_ok:
             continue
 
