@@ -108,7 +108,7 @@ def build(session: Session) -> dict:
                     f"{', '.join(sorted(session.arrays)[:5])} "
                     f"({_ts_iso(session.started_at)[:10]})"
                 ),
-                "url":              cp_url,
+                "url":              "",
                 "dateAccessed":     _ts_iso(session.started_at),
                 "sessionStart":     _ts_iso(session.started_at),
                 "sessionEnd":       _ts_iso(session.last_seen),

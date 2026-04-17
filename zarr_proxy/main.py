@@ -192,7 +192,7 @@ async def store_root(store_name: str, request: Request) -> Response:
     """Serve root .zgroup for a store, or fsspec directory listing."""
     store = _resolve_store(store_name)
     if store is None:
-        return PlainTextResponse("Not found", status_code=404)
+        return JSONResponse({"error": "store not found"}, status_code=404)
 
     if "list" in request.query_params:
         entries = [p.name for p in store.iterdir()]
