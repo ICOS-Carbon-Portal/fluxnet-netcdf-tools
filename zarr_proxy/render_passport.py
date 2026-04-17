@@ -8,7 +8,6 @@ Usage:
 import argparse
 import json
 import pathlib
-import sys
 from html import escape
 
 
@@ -140,8 +139,8 @@ ICON_SVG = """<svg width="36" height="36" viewBox="0 0 36 36" fill="none"
 # ── main renderer ─────────────────────────────────────────────────────────────
 
 def render(passport_path: pathlib.Path) -> str:
-    doc   = json.loads(passport_path.read_text(encoding="utf-8"))
-    graph = {node["@id"]: node for node in doc["@graph"]}
+    """Generate an HTML landing page string from a passport JSON-LD file."""
+    doc = json.loads(passport_path.read_text(encoding="utf-8"))
 
     # Find the DataPassport node (not the root "./" node)
     pp = next(
@@ -153,7 +152,6 @@ def render(passport_path: pathlib.Path) -> str:
     handle_url = f"https://hdl.handle.net/{pid.removeprefix('hdl:')}"
     name       = escape(pp.get("name", "Data Access Passport"))
     date       = escape(pp.get("sessionStart", "")[:10])
-    cp_url     = escape(pp.get("url", ""))
 
     agent      = pp.get("agent", {})
     ip_anon    = escape(agent.get("ipAnonymised", ""))

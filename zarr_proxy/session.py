@@ -5,7 +5,6 @@ access sessions, then triggers passport minting when a session goes idle.
 import asyncio
 import hashlib
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable, Awaitable
 
@@ -106,11 +105,11 @@ async def _reaper_loop() -> None:
         await asyncio.sleep(10)
         now = time.time()
         expired = [
-            ip for ip, s in list(_sessions.items())
+            key for key, s in list(_sessions.items())
             if now - s.last_seen > config.SESSION_TIMEOUT_SEC
         ]
-        for ip in expired:
-            session = _sessions.pop(ip, None)
+        for key in expired:
+            session = _sessions.pop(key, None)
             if session and session.chunks:
                 for cb in _on_close_callbacks:
                     try:

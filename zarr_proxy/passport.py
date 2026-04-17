@@ -15,10 +15,6 @@ from . import config
 from .session import Session
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def _ts_iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -41,13 +37,13 @@ def _station_metadata(store_path: str, group: str) -> dict:
         return {}
 
 
-def build(session: Session, handle_pid: str = "", cp_url: str = "") -> dict:
+def build(session: Session) -> dict:
     """
     Build the ROCrate JSON-LD passport dict for *session*.
-    *handle_pid* and *cp_url* may be empty strings if minting failed.
     passportSha256 is computed last and embedded.
+    The caller fills in @id, url, and passportSha256 after minting the Handle PID.
     """
-    passport_id = handle_pid or f"urn:uuid:{uuid.uuid4()}"
+    passport_id = f"urn:uuid:{uuid.uuid4()}"
 
     # Deduplicate per-variable checksum manifest
     array_manifest: dict[str, dict] = {}

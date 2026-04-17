@@ -34,11 +34,14 @@ def _resolve_store(store_name: str) -> pathlib.Path | None:
     """
     Return the resolved store path if *store_name* is a valid zarr store
     inside STORE_DIR, or None if it doesn't exist / is a path traversal attempt.
+    Requires a .zgroup or .zmetadata marker to reject non-zarr directories.
     """
     store = (STORE_DIR / store_name).resolve()
     if not str(store).startswith(str(STORE_DIR)):
         return None
     if not store.is_dir():
+        return None
+    if not (store / ".zgroup").exists() and not (store / ".zmetadata").exists():
         return None
     return store
 
@@ -101,7 +104,8 @@ async def _on_session_close(s: session.Session) -> None:
 async def lifespan(app: FastAPI):
     session.register_on_close(_on_session_close)
     session.start_reaper()
-    stores = [p.name for p in STORE_DIR.iterdir() if p.is_dir()]
+    stores = [p.name for p in STORE_DIR.iterdir()
+              if p.is_dir() and ((p / ".zgroup").exists() or (p / ".zmetadata").exists())]
     log.info("zarr_proxy serving %d store(s) from %s: %s", len(stores), STORE_DIR, stores)
     yield
 
@@ -122,7 +126,8 @@ def _client_ip(request: Request) -> str:
 @app.get("/")
 async def root() -> JSONResponse:
     """List available zarr stores."""
-    stores = [p.name for p in STORE_DIR.iterdir() if p.is_dir()]
+    stores = [p.name for p in STORE_DIR.iterdir()
+              if p.is_dir() and ((p / ".zgroup").exists() or (p / ".zmetadata").exists())]
     return JSONResponse({"stores": sorted(stores)})
 
 
@@ -138,7 +143,7 @@ async def close_session(store_name: str, request: Request) -> JSONResponse:
     If the session has no chunks (nothing was read), returns an empty result.
     """
     if _resolve_store(store_name) is None:
-        return PlainTextResponse("Not found", status_code=404)
+        return JSONResponse({"error": "store not found"}, status_code=404)
 
     ip = _client_ip(request)
     s  = session.pop(ip, store_name)
@@ -169,7 +174,7 @@ async def get_passport(store_name: str, request: Request) -> JSONResponse:
     session for *store_name*.
     """
     if _resolve_store(store_name) is None:
-        return PlainTextResponse("Not found", status_code=404)
+        return JSONResponse({"error": "store not found"}, status_code=404)
 
     ip = _client_ip(request)
     s  = session.get_or_create(ip, store_name)

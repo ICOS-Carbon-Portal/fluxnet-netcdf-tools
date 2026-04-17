@@ -186,7 +186,7 @@ class _TrackedArray:
 
     def sel(self, indexers: dict | None = None, **kwargs) -> "_TrackedArray":
         merged = {**(indexers or {}), **kwargs}
-        self._queries.append({
+        self._replace_or_append({
             "variable": self._variable,
             "group":    self._group,
             "sel":      {k: _serialise(v) for k, v in merged.items()},
@@ -197,7 +197,7 @@ class _TrackedArray:
 
     def isel(self, indexers: dict | None = None, **kwargs) -> "_TrackedArray":
         merged = {**(indexers or {}), **kwargs}
-        self._queries.append({
+        self._replace_or_append({
             "variable": self._variable,
             "group":    self._group,
             "isel":     {k: _serialise(v) for k, v in merged.items()},
@@ -205,6 +205,17 @@ class _TrackedArray:
         return _TrackedArray(
             self._da.isel(merged), self._variable, self._group, self._queries
         )
+
+    def _replace_or_append(self, entry: dict) -> None:
+        """Replace the last query entry if it's a bare __getitem__ for the same variable."""
+        if (self._queries
+                and self._queries[-1].get("variable") == self._variable
+                and self._queries[-1].get("group") == self._group
+                and "sel" not in self._queries[-1]
+                and "isel" not in self._queries[-1]):
+            self._queries[-1] = entry
+        else:
+            self._queries.append(entry)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._da, name)
