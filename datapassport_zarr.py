@@ -275,7 +275,8 @@ def open_zarr(
     **xr_kwargs
         Extra keyword arguments forwarded to xr.open_zarr()
         (e.g. chunks="auto", decode_timedelta=False).
-        consolidated=True is set by default (required for the HTTP store).
+        consolidated=False is set by default (group-level consolidated metadata
+        is not available over HTTP; each key is fetched individually).
 
     Returns
     -------
@@ -300,7 +301,7 @@ def open_zarr(
     with open_zarr("http://localhost:8000/icos-fluxnet.zarr", group="SE-Svb") as ds:
         t = ds["time"].values   # fetches time chunks — recorded in passport
     """
-    xr_kwargs.setdefault("consolidated", True)
+    xr_kwargs.setdefault("consolidated", False)
     so = xr_kwargs.pop("storage_options", {})
     so.setdefault("headers", {})["X-DataPassport-Client"] = "datapassport_zarr"
     url = proxy_url.rstrip("/")
