@@ -214,7 +214,11 @@ def cmd_populate(args: argparse.Namespace) -> None:
         # ── Record provenance ─────────────────────────────────────────────────
         store = zarr.open_group(store_path, mode="a")   # refresh after writes
         _update_provenance(store, site_id, action, arch["name"], pid_url, dobj_citation)
-        zarr.consolidate_metadata(store_path)            # keep .zmetadata in sync
+        zarr.consolidate_metadata(store_path)            # store-root .zmetadata
+        for sub in Path(store_path).joinpath(site_id).iterdir():
+            if sub.is_dir() and (sub / ".zgroup").exists():
+                zarr.consolidate_metadata(str(sub))
+        zarr.consolidate_metadata(str(Path(store_path) / site_id))  # group .zmetadata
 
         # ── Cleanup ───────────────────────────────────────────────────────────
         if not args.keep_csv:
