@@ -497,11 +497,16 @@ and the active deployment period.
 ## Installation
 
 ```bash
-pip install numpy pandas netCDF4
+pip install -r requirements.txt
 ```
 
-Python 3.10+ required.  No other external dependencies — all network
-requests use the standard library (`urllib`).
+Or individually:
+
+```bash
+pip install numpy pandas netCDF4 xarray "zarr<3" fastapi "uvicorn[standard]" fsspec aiohttp
+```
+
+Python 3.10+ required.
 
 ---
 
