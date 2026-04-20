@@ -172,20 +172,28 @@ print(ds["NEE"])   # DataArray(time, ustar_threshold, nee_variant)
 
 ### `run_proxy.py` + `datapassport_zarr.py` — zarr data passport proxy
 
-Serves `icos-fluxnet.zarr` as a standard zarr v2 HTTP store and
+Serves one or more zarr stores as standard zarr v2 HTTP stores and
 automatically generates a **data passport** for every client session.
 
 ```
-python run_proxy.py [--host HOST] [--port PORT] [--store DIR]
+python run_proxy.py [--host HOST] [--port PORT] [--store-dir DIR]
+```
+
+Each zarr store inside `--store-dir` is served under its directory name:
+
+```
+GET /icos-fluxnet.zarr/{key}   →  icos-fluxnet.zarr/.zgroup, chunks, …
+GET /other-store.zarr/{key}    →  other-store.zarr/…
+GET /                          →  {"stores": ["icos-fluxnet.zarr", …]}
 ```
 
 **How it works**
 
-1. The proxy (FastAPI) records every zarr chunk served, keyed by client IP.
+1. The proxy (FastAPI) records every zarr chunk served, keyed by `(client IP, store)`.
 2. When a session closes, it builds a ROCrate JSON-LD passport with
    SHA-256 checksums of all delivered data, mints a Handle PID, uploads
    the passport to the ICOS Carbon Portal, and fires a Matomo usage event.
-3. The client receives the Handle PID synchronously via `POST /session/close`.
+3. The client receives the Handle PID synchronously via `POST /{store}/session/close`.
 
 **Recommended client — `datapassport_zarr.open_zarr()`**
 
@@ -198,7 +206,7 @@ to the proxy on close.  Passport covers only the data actually delivered
 from datapassport_zarr import open_zarr
 
 # Context manager — passport minted automatically on __exit__
-with open_zarr("http://localhost:8000/", group="SE-Svb") as ds:
+with open_zarr("http://localhost:8000/icos-fluxnet.zarr", group="SE-Svb") as ds:
     nee = ds["NEE"].sel(ustar_threshold="VUT", nee_variant="REF") \
                    .isel(time=slice(0, 100)).values
     ta  = ds["TA_F"].values
@@ -207,7 +215,7 @@ with open_zarr("http://localhost:8000/", group="SE-Svb") as ds:
 # Saved to        : .passport/20260416T210000_SE-Svb.json
 
 # Explicit close — useful in notebooks; returns the full info dict
-ds = open_zarr("http://localhost:8000/", group="SE-Svb/fluxnet_dd")
+ds = open_zarr("http://localhost:8000/icos-fluxnet.zarr", group="SE-Svb/fluxnet_dd")
 gpp = ds["GPP"].values
 info = ds.close()
 print(info["passport_pid"])    # "hdl:11676/..."
@@ -217,11 +225,15 @@ print(info["queries"])         # recorded selection steps
 A `__del__` safety net fires the close if the user never calls it
 explicitly (e.g. script exits without using a context manager).
 
+Clients that do not use `datapassport_zarr` receive an
+`X-DataPassport-Warning` response header on every chunk request,
+reminding them to install the wrapper.
+
 `open_zarr` options:
 
 | Argument | Default | Description |
 |---|---|---|
-| `proxy_url` | (required) | Base URL of the zarr proxy |
+| `proxy_url` | (required) | Base URL including store name, e.g. `http://localhost:8000/icos-fluxnet.zarr` |
 | `group` | `""` | Zarr group, e.g. `"SE-Svb"` or `"SE-Svb/fluxnet_dd"` |
 | `save_passport` | `True` | Save passport JSON to `passport_dir` on close |
 | `passport_dir` | `".passport/"` | Directory for saved passport files |
@@ -232,11 +244,13 @@ explicitly (e.g. script exits without using a context manager).
 
 | Endpoint | Description |
 |---|---|
-| `GET /{key}` | Serve zarr key (metadata or chunk); chunks are tracked |
-| `POST /session/close` | Close session, mint passport synchronously, return PID |
-| `GET /session/passport` | Retrieve PID for current/last session (polling fallback) |
+| `GET /` | List available zarr stores |
+| `GET /{store}/` | Serve root `.zgroup` for a store |
+| `GET /{store}/{key}` | Serve zarr key (metadata or chunk); chunks are tracked |
+| `POST /{store}/session/close` | Close session, mint passport synchronously, return PID |
+| `GET /{store}/session/passport` | Retrieve PID for current/last session (polling fallback) |
 
-`POST /session/close` accepts an optional JSON body
+`POST /{store}/session/close` accepts an optional JSON body
 `{"queries": [...]}` (sent automatically by `datapassport_zarr`) and returns:
 
 ```json
@@ -250,14 +264,43 @@ explicitly (e.g. script exits without using a context manager).
 }
 ```
 
-If the client never calls `/session/close`, the idle-timeout reaper
+If the client never calls `/{store}/session/close`, the idle-timeout reaper
 (default 5 min) mints the passport automatically.
+
+**Demo notebook**
+
+`explore_zarr.ipynb` demonstrates the full passport workflow.  Set
+`USE_PROXY = True` at the top of the notebook, start the proxy, and run
+all cells — a passport is minted automatically on the final cell.
+
+```python
+# explore_zarr.ipynb — top cell
+USE_PROXY  = True                                    # False → read store directly
+PROXY_URL  = "http://localhost:8000/icos-fluxnet.zarr"
+```
+
+```bash
+# Start the proxy (separate terminal)
+python run_proxy.py --store-dir .
+```
+
+**Landing page**
+
+`zarr_proxy/render_passport.py` generates an HTML landing page from a
+saved `.jsonld` passport file:
+
+```python
+from zarr_proxy.render_passport import render
+import pathlib
+html = render(pathlib.Path("passports/fed285a18bddad47.jsonld"))
+pathlib.Path("landing.html").write_text(html)
+```
 
 **Configuration** (environment variables):
 
 | Variable | Default | Description |
 |---|---|---|
-| `ZARR_STORE_PATH` | `icos-fluxnet.zarr` | Local zarr store to serve |
+| `ZARR_STORE_DIR` | `.` | Directory containing one or more zarr stores |
 | `SESSION_TIMEOUT_SEC` | `300` | Idle seconds before session closes automatically |
 | `HANDLE_PREFIX` | `11676` | EPIC Handle prefix |
 | `HANDLE_ENDPOINT` | `https://epic5.storage.surfsara.nl/api/handles` | Handle REST API |
@@ -276,11 +319,12 @@ If the client never calls `/session/close`, the idle-timeout reaper
 
 | File | Responsibility |
 |---|---|
-| `run_proxy.py` | CLI launcher (`--host`, `--port`, `--store`) |
+| `run_proxy.py` | CLI launcher (`--host`, `--port`, `--store-dir`) |
 | `datapassport_zarr.py` | Client wrapper: `open_zarr()`, `DataPassportDataset`, `_TrackedArray` |
-| `zarr_proxy/main.py` | FastAPI app, zarr key router, `/session/close`, `/session/passport` |
-| `zarr_proxy/session.py` | IP-based session accumulator, idle-timeout reaper |
+| `zarr_proxy/main.py` | FastAPI app, multi-store router, session endpoints |
+| `zarr_proxy/session.py` | `(IP, store)` session accumulator, idle-timeout reaper |
 | `zarr_proxy/passport.py` | ROCrate JSON-LD builder, SHA-256 checksums |
+| `zarr_proxy/render_passport.py` | HTML landing page generator from `.jsonld` passports |
 | `zarr_proxy/handle_client.py` | EPIC Handle PID minting and updating |
 | `zarr_proxy/cp_client.py` | ICOS CP metadata upload via CPauth |
 | `zarr_proxy/matomo_client.py` | Server-side Matomo tracking event |
