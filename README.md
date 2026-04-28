@@ -1,8 +1,10 @@
-# ICOS / FLUXNET → CF-1.12 NetCDF4 conversion toolkit
+# ICOS toolkit — Fluxnet & Obspack zarr stores and CF-NetCDF4 conversion
 
-Python scripts to convert ICOS ETC L2 CSV data (FLUXES, FLUXNET, METEO,
-METEOSENS) to CF-1.12–compliant NetCDF4 files.  Station metadata and
-citations are fetched live from the ICOS Carbon Portal.
+Python scripts to build **zarr v2 stores** from ICOS data — both ecosystem
+fluxes (Fluxnet) and atmospheric greenhouse-gas observations (Obspack) —
+and to convert ICOS ETC L2 CSV files (FLUXES, FLUXNET, METEO, METEOSENS)
+to CF-1.12–compliant NetCDF4 files.  Station metadata and citations are
+fetched live from the ICOS Carbon Portal.
 
 ## Scripts
 
