@@ -7,3 +7,6 @@ fastapi
 uvicorn[standard]
 fsspec
 aiohttp
+matplotlib
+ipywidgets
+folium
