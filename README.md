@@ -170,6 +170,82 @@ print(ds["NEE"])   # DataArray(time, ustar_threshold, nee_variant)
 
 ---
 
+### `obspack2zarr.py` — zarr store from an ICOS Obspack collection
+
+Companion to `fluxnet2zarr.py` for the ICOS atmosphere thematic centre.
+Resolves an Obspack collection DOI (CO2 / CH4 / N2O / CO data),
+downloads the per-station CF-NetCDF files, and ingests them into a zarr v2
+store.  Multiple gases at the same station + sampling height share a single
+group; each gas keeps its own time dimension because instruments and
+cadences differ between gases.
+
+```
+# Populate one station+height
+python obspack2zarr.py populate 10.18160/1PZ9-SDJ2 --station HTM150
+
+# Limit to specific gases
+python obspack2zarr.py populate 10.18160/1PZ9-SDJ2 --gas co2 ch4
+
+# Populate all 357 files (~70 stations, ~65 min)
+python obspack2zarr.py populate 10.18160/1PZ9-SDJ2
+
+# Manage the store
+python obspack2zarr.py list
+python obspack2zarr.py info  HTM150
+python obspack2zarr.py remove HTM150
+```
+
+**Station ID convention**: trigram + sampling height (m a.g.l. rounded to
+integer), e.g. `HTM150`, `CBW207`, `CMN0`.  Surface stations get height `0`.
+
+**Store layout**:
+
+```
+icos-obspack.zarr/
+  HTM150/                ← root group: all gases at this trigram + height
+    .zgroup
+    .zattrs              ← static site metadata + ATC landing-page enrichment
+                           + _provenance JSON
+    co2/                 ← rescaled to ppm; calibration_scale on the array
+    co2_std_dev/
+    co2_qc_flag/
+    …
+    ch4/                 ← rescaled to ppb
+    ch4_std_dev/
+    …
+    n2o/  co/
+    time_co2/  time_ch4/ …  ← per-gas time axes
+  CBW207/  …
+  CMN0/  …
+```
+
+Static columns that don't vary along the time axis (`latitude`, `longitude`,
+`altitude`, `intake_height`, `instrument`) are promoted to group `.zattrs`
+instead of being stored as duplicated 1-D arrays.
+
+**Reading with xarray**:
+
+```python
+import xarray as xr
+ds = xr.open_zarr("icos-obspack.zarr", group="HTM150")
+print(ds["co2"])         # ppm  ─ time_co2 axis
+print(ds["ch4"])         # ppb  ─ time_ch4 axis
+print(ds.attrs["intake_height"], ds.attrs["site_latitude"])
+```
+
+`explore_obspack.ipynb` provides a notebook viewer with cascading
+trigram → height → gas dropdowns and a time-series plot.
+
+For full design rationale, observed Obspack file structure, and future
+work (custom Obspack export, interactive map viewer), see
+`obspack_zarr_readme.md`.
+
+The same `run_proxy.py` (below) serves the Obspack store too — point a
+client at `http://host:port/icos-obspack.zarr/HTM150` exactly like the
+Fluxnet store.
+
+---
+
 ### `run_proxy.py` + `datapassport_zarr.py` — zarr data passport proxy
 
 Serves one or more zarr stores as standard zarr v2 HTTP stores and

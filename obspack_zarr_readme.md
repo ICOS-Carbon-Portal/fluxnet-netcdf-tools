@@ -421,4 +421,4 @@ automatically mints a passport, identical to fluxnet pattern.
 - [x] Full ingest of 357 files — completed 2026-04-28: 357/357 files ingested,
       0 failures, ~65 minutes total. 100 station-groups (TRIGRAM+height) across
       40 unique trigrams.
-- [ ] README update
+- [x] README update — section added between fluxnet2zarr and run_proxy
