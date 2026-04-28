@@ -305,10 +305,11 @@ def open_zarr(
     so = xr_kwargs.pop("storage_options", {})
     so.setdefault("headers", {})["X-DataPassport-Client"] = "datapassport_zarr"
     url = proxy_url.rstrip("/")
-    # Append the group path to the URL so .zmetadata is fetched from the group root,
-    # not the store root (store-root .zmetadata doesn't contain group-level arrays).
-    store_url = f"{url}/{group.strip('/')}" if group else url
-    ds  = xr.open_zarr(store_url + "/", storage_options=so, **xr_kwargs)
+    # Open the store at the root URL and pass `group=` to xarray. This relies on
+    # the store-root .zmetadata containing every group's keys (zarr's standard
+    # `consolidate_metadata` does this from the root). Per-group .zmetadata is
+    # not required.
+    ds  = xr.open_zarr(url + "/", group=group or None, storage_options=so, **xr_kwargs)
     return DataPassportDataset(
         ds,
         proxy_url=url,
