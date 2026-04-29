@@ -9,4 +9,6 @@ fsspec
 aiohttp
 matplotlib
 ipywidgets
-folium
+cartopy
+mplcursors
+ipympl

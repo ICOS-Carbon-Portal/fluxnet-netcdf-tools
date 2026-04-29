@@ -1801,6 +1801,15 @@ def _write_group_to_zarr(
     ds_1d = _build_1d_dataset(df, ts_start, ts_end, freq_code, consumed, used_names)
     n_1d = len(ds_1d.data_vars); _flush(ds_1d); del ds_1d
 
+    # to_zarr(mode="a") wipes the group .zattrs on every call, so only the very
+    # last _flush leaves any group attrs in place — and that flush passes {}.
+    # Re-apply global_attrs once at the end so each (sub-)group keeps its
+    # station metadata (geospatial_lat/_lon, station_elevation, country, …).
+    import zarr as _zarr
+    _grp = _zarr.open_group(store_path, mode="a")[group_path]
+    for k, v in global_attrs.items():
+        _grp.attrs[k] = v
+
     print(f"      {n_nd:2d} multi-dim var(s)  [{len(consumed):3d} flat columns collapsed]"
           f"  +  {n_1d:3d} 1-D var(s)")
     return consumed
