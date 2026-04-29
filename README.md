@@ -248,6 +248,76 @@ Fluxnet store.
 
 ---
 
+### `combine_to_dim.py` — build combined-view groups for direct xarray filtering
+
+Per-station groups (e.g. `SE-Svb/`, `HTM150/`) make every site an independent
+`xr.Dataset`, so spatial filtering across all stations needs a Python loop.
+`combine_to_dim.py` builds *sibling* combined groups where every station shares
+one `(station, time)` axis pair, with `lat`, `lon`, etc. as 1-D coords along
+the `station` dimension.  The combined view is **additive**: per-station
+groups are unchanged, both layouts coexist.
+
+```
+# Obspack — one combined group per gas
+python combine_to_dim.py obspack
+python combine_to_dim.py obspack --gas co2
+# → icos-obspack.zarr/co2  (98 stations × 459 871 hourly timestamps)
+#   icos-obspack.zarr/ch4
+#   icos-obspack.zarr/n2o
+#   icos-obspack.zarr/co
+
+# Fluxnet — one combined group per frequency
+python combine_to_dim.py fluxnet
+# → icos-fluxnet.zarr/_combined/fluxnet_dd
+#   icos-fluxnet.zarr/_combined/fluxnet_mm
+#   icos-fluxnet.zarr/_combined/fluxnet_ww
+#   icos-fluxnet.zarr/_combined/fluxnet_yy
+```
+
+Variables with station-specific dimensions (`soil_layer` for fluxnet
+TS / SWC; `r`/`h`/`v` profile dims) are skipped automatically — they stay only
+in the per-station view.  Time axes are unioned across stations; missing
+samples are NaN-filled and zarr's chunk compression keeps NaN-only chunks
+small (e.g. 4 obspack gases × all-stations time = ~290 MB on disk).
+
+**Querying a combined group is one xarray expression**:
+
+```python
+import xarray as xr
+
+ds = xr.open_zarr("icos-obspack.zarr", group="co2")
+
+nl_2024 = (
+    ds["co2"]
+      .where((ds.lat >= 50.7) & (ds.lat <= 53.6) &
+             (ds.lon >=  3.3) & (ds.lon <=  7.3),
+             drop=True)
+      .sel(time_co2=slice("2024-01-01", "2024-12-31"))
+)
+
+# nl_2024 is 2-D (station, time_co2); coords lat/lon/intake_height/site_name
+# travel with the DataArray.  Aggregations work as usual:
+nl_2024.mean("time_co2")     # mean per station
+nl_2024.mean("station")      # mean across stations per timestep
+```
+
+xarray pattern reference:
+
+| Use case | Tool | Why |
+|---|---|---|
+| `time` slice | `.sel(time=slice(T0, T1))` | `time` is the indexed dim; binary search |
+| Lat/lon range | `.where(mask, drop=True)` | `lat`/`lon` are non-index coords on `station` |
+| Specific station IDs | `.sel(station=[...])` | `station` is the indexed dim |
+| Predicate over a coord (prefix, regex, etc.) | build a mask, then `.sel(station=...)` or `.where()` | needs evaluation in Python |
+
+See `nl_2024_minimal.ipynb` for a worked Netherlands-2024 query against
+both stores in two short cells (direct file access + via the proxy).
+
+The design rationale and remaining open questions (sparse-chunk sizing,
+query-level passport upgrade) live in `plan_rebuild_zarrs.md`.
+
+---
+
 ### `run_proxy.py` + `datapassport_zarr.py` — zarr data passport proxy
 
 Serves one or more zarr stores as standard zarr v2 HTTP stores and

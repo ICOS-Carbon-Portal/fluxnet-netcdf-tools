@@ -340,6 +340,27 @@ python run_proxy.py --store-dir .
 
 ---
 
+## Combined-view groups (added 2026-04-29)
+
+`combine_to_dim.py obspack` builds a sibling group per gas with a single
+`station` dimension and `lat`/`lon`/`intake_height` as 1-D coords —
+enabling direct xarray spatial filtering without a per-station loop.
+
+```python
+ds = xr.open_zarr("icos-obspack.zarr", group="co2")
+nl = ds["co2"].where(
+        (ds.lat.between(50.7, 53.6)) & (ds.lon.between(3.3, 7.3)),
+        drop=True,
+).sel(time_co2=slice("2024-01-01", "2024-12-31"))
+```
+
+Per-station groups remain unchanged. See `plan_rebuild_zarrs.md` for the
+full design and the open question of upgrading the data passport from a
+chunk-level manifest to a query-level record now that the user's intent
+is captured by a single xarray expression.
+
+---
+
 ## Future work (not in initial implementation)
 
 ### Build custom Obspacks from the zarr store
