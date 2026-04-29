@@ -157,14 +157,73 @@ async def close_session(store_name: str, request: Request) -> JSONResponse:
         pass
 
     pid = await _mint_passport(s)
+
+    # Surviving station list comes from the client's last query entry, written
+    # by datapassport_zarr after the where()/sel() chain. Falls back to [].
+    stations = []
+    for entry in reversed(s.queries or []):
+        if "surviving_stations" in entry:
+            stations = entry["surviving_stations"]
+            break
+
+    # Best-effort: per-station source_doi/citation from the on-disk store's
+    # combined-view coords (if present).
+    station_sources = _resolve_station_sources(s.store, stations) if stations else []
+
     return JSONResponse({
-        "passport_pid":  pid,
-        "passport_url":  s.passport_pid and f"https://doi.org/{pid}" or "",
-        "chunks":        len(s.chunks),
-        "bytes_served":  s.bytes_total,
-        "arrays":        sorted(s.arrays),
-        "queries":       s.queries,
+        "passport_pid":   pid,
+        "passport_url":   s.passport_pid and f"https://doi.org/{pid}" or "",
+        "chunks":         len(s.chunks),
+        "bytes_served":   s.bytes_total,
+        "arrays":         sorted(s.arrays),
+        "queries":        s.queries,
+        "ip_anonymised":  s.ip_anonymised,
+        "stations":       stations,
+        "station_sources": station_sources,
     })
+
+
+def _resolve_station_sources(store_name: str, stations: list[str]) -> list[dict]:
+    """For each station id, look up source_doi + citation in the on-disk
+    combined-view coords; return [{station, source_doi, citation}, ...]."""
+    if not stations:
+        return []
+    store = _resolve_store(store_name)
+    if store is None:
+        return []
+    try:
+        import zarr
+        # Walk every group to find one whose `station` coord values cover
+        # the requested stations. The combined-view groups are at the store
+        # root for obspack (co2/, ch4/, …) and under _combined/ for fluxnet.
+        candidates = []
+        for grp_path in [p.relative_to(store) for p in store.rglob(".zgroup")]:
+            grp_path = str(grp_path.parent).replace("\\", "/")
+            if grp_path == ".":
+                continue
+            try:
+                g = zarr.open_group(str(store), mode="r", path=grp_path)
+            except Exception:
+                continue
+            if "station" in g and "source_doi" in g and "citation" in g:
+                candidates.append((grp_path, g))
+        out: list[dict] = []
+        wanted = set(stations)
+        for _, g in candidates:
+            sids = list(g["station"][:])
+            sdoi = list(g["source_doi"][:])
+            cite = list(g["citation"][:]) if "citation" in g else [""] * len(sids)
+            for sid, doi, cit in zip(sids, sdoi, cite):
+                sid_str = sid.decode() if isinstance(sid, (bytes, bytearray)) else str(sid)
+                if sid_str in wanted and not any(o["station"] == sid_str for o in out):
+                    out.append({
+                        "station":    sid_str,
+                        "source_doi": doi.decode() if isinstance(doi, (bytes, bytearray)) else str(doi),
+                        "citation":   cit.decode() if isinstance(cit, (bytes, bytearray)) else str(cit),
+                    })
+        return out
+    except Exception:
+        return []
 
 
 @app.get("/{store_name}/session/passport")

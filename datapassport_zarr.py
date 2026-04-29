@@ -130,14 +130,24 @@ class DataPassportDataset:
         introspected (extracts simple coord ≥/≤/== comparisons into a JSON
         record); for arbitrary masks the human-readable repr is preserved.
         """
-        self._queries.append({
+        new_ds = (self._ds.where(cond, drop=drop) if other is None
+                  else self._ds.where(cond, other, drop=drop))
+        entry = {
             "op":    "where",
             "group": self._group,
             "drop":  bool(drop),
             "cond":  _summarise_condition(cond),
-        })
-        new_ds = (self._ds.where(cond, drop=drop) if other is None
-                  else self._ds.where(cond, other, drop=drop))
+        }
+        if "station" in new_ds.coords:
+            try:
+                vals = new_ds.coords["station"].values
+                entry["surviving_stations"] = [
+                    v.decode() if isinstance(v, (bytes, bytearray)) else str(v)
+                    for v in vals
+                ]
+            except Exception:
+                pass
+        self._queries.append(entry)
         return self._wrap(new_ds)
 
     # ── Escape hatch: record an arbitrary user-supplied query entry ───────────
@@ -269,15 +279,26 @@ class _TrackedArray:
 
     def where(self, cond, drop: bool = False, other=None) -> "_TrackedArray":
         """Record `.where()` on a tracked array and delegate."""
-        self._queries.append({
+        new_da = (self._da.where(cond, drop=drop) if other is None
+                  else self._da.where(cond, other, drop=drop))
+        entry = {
             "op":       "where",
             "variable": self._variable,
             "group":    self._group,
             "drop":     bool(drop),
             "cond":     _summarise_condition(cond),
-        })
-        new_da = (self._da.where(cond, drop=drop) if other is None
-                  else self._da.where(cond, other, drop=drop))
+        }
+        # Surviving station coord values (if a `station` coord exists)
+        if "station" in new_da.coords:
+            try:
+                vals = new_da.coords["station"].values
+                entry["surviving_stations"] = [
+                    v.decode() if isinstance(v, (bytes, bytearray)) else str(v)
+                    for v in vals
+                ]
+            except Exception:
+                pass
+        self._queries.append(entry)
         return _TrackedArray(new_da, self._variable, self._group, self._queries)
 
     def _replace_or_append(self, entry: dict) -> None:
