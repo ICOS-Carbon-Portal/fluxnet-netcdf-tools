@@ -37,6 +37,108 @@ def _station_metadata(store_path: str, group: str) -> dict:
         return {}
 
 
+def _station_entities(store_path: str, group_path: str, surviving_stations: list[str]) -> tuple[list[dict], list[dict]]:
+    """For a combined-view group, build per-station and per-DataObject ROCrate
+    entities for each station in *surviving_stations*. Reads 1-D coords:
+        station, lat, lon, country, site_name, source_doi, citation,
+        station_url (optional), intake_height (optional), dataset_name (optional).
+
+    Returns (station_entities, dataobject_entities) — each a list of dicts
+    suitable to insert into the passport @graph.
+    """
+    if not surviving_stations:
+        return [], []
+    try:
+        g = zarr.open_group(store_path, mode="r", path=group_path)
+    except Exception:
+        return [], []
+    if "station" not in g:
+        return [], []
+
+    def _arr(name):
+        if name not in g:
+            return None
+        try:
+            return list(g[name][:])
+        except Exception:
+            return None
+
+    sids = _arr("station") or []
+    sids = [s.decode() if isinstance(s, (bytes, bytearray)) else str(s) for s in sids]
+    if not sids:
+        return [], []
+
+    coords = {
+        "lat":            _arr("lat") or [],
+        "lon":            _arr("lon") or [],
+        "country":        _arr("country") or [],
+        "site_name":      _arr("site_name") or _arr("station_name") or [],
+        "source_doi":     _arr("source_doi") or [],
+        "citation":       _arr("citation") or [],
+        "station_url":    _arr("station_url") or [],
+        "intake_height":  _arr("intake_height") or [],
+        "dataset_name":   _arr("dataset_name") or [],
+    }
+
+    def _at(name, idx, default=None):
+        arr = coords.get(name) or []
+        if idx >= len(arr):
+            return default
+        v = arr[idx]
+        if isinstance(v, (bytes, bytearray)):
+            return v.decode("utf-8", errors="replace")
+        return v
+
+    wanted = set(surviving_stations)
+    stations_out: list[dict] = []
+    dataobjects_out: list[dict] = []
+    seen_pids: set[str] = set()
+
+    for i, sid in enumerate(sids):
+        if sid not in wanted:
+            continue
+
+        lat = _at("lat", i, None)
+        lon = _at("lon", i, None)
+        intake = _at("intake_height", i, None)
+        url = _at("station_url", i, "")
+        pid = _at("source_doi", i, "")
+
+        st_node: dict = {
+            "@id":        f"#station/{sid}",
+            "@type":      "icos:Station",
+            "identifier": sid,
+            "name":       _at("site_name", i, sid),
+            "url":        url,
+        }
+        if isinstance(lat, float) and isinstance(lon, float):
+            st_node["geo"] = {"@type": "GeoCoordinates",
+                              "latitude": lat, "longitude": lon}
+        if isinstance(intake, float):
+            st_node["intakeHeight"] = intake
+        if (cc := _at("country", i, "")):
+            st_node["addressCountry"] = cc
+        if pid:
+            st_node["isBasedOn"] = {"@id": pid}
+        stations_out.append(st_node)
+
+        # One DataObject per source PID (deduplicated across stations).
+        if pid and pid not in seen_pids:
+            seen_pids.add(pid)
+            do_node: dict = {
+                "@id":      pid,
+                "@type":    ["Dataset", "icos:DataObject"],
+                "url":      pid,
+            }
+            if (cit := _at("citation", i, "")):
+                do_node["citation"] = cit
+            if (fname := _at("dataset_name", i, "")):
+                do_node["name"] = fname
+            dataobjects_out.append(do_node)
+
+    return stations_out, dataobjects_out
+
+
 def build(session: Session) -> dict:
     """
     Build the ROCrate JSON-LD passport dict for *session*.
@@ -89,6 +191,33 @@ def build(session: Session) -> dict:
             station_meta = m
             break
 
+    # Surviving stations from the client query log (for combined-view groups).
+    surviving_stations: list[str] = []
+    for entry in reversed(session.queries or []):
+        if "surviving_stations" in entry:
+            surviving_stations = list(entry["surviving_stations"])
+            break
+
+    # Build Station + DataObject entities by reading the on-disk combined-view
+    # group's 1-D coords. The group path is taken from the first session group
+    # that has a `station` coord; falls back to no entities.
+    stations_entities: list[dict] = []
+    dataobjects_entities: list[dict] = []
+    if surviving_stations:
+        for g in sorted(session.groups):
+            stations_entities, dataobjects_entities = _station_entities(
+                store_path, g, surviving_stations,
+            )
+            if stations_entities:
+                break
+
+    # Aggregate "hasPart" for the passport node = arrays + stations + dataobjects
+    passport_has_parts = (
+        has_parts
+        + [{"@id": s["@id"]} for s in stations_entities]
+        + [{"@id": d["@id"]} for d in dataobjects_entities]
+    )
+
     passport: dict = {
         "@context": [
             "https://w3id.org/ro/crate/1.1/context",
@@ -118,14 +247,17 @@ def build(session: Session) -> dict:
                 },
                 "accessedGroups":   sorted(session.groups),
                 "accessedArrays":   sorted(session.arrays),
+                "stations":         surviving_stations,
                 "query":            session.queries or [],
-                "hasPart":          has_parts,
+                "hasPart":          passport_has_parts,
                 "totalBytesServed": session.bytes_total,
                 "totalChunks":      len(session.chunks),
                 "isPartOf":         {"@id": station_meta.get("source_doi", "")},
                 "citation":         station_meta.get("citation", ""),
                 "passportSha256":   None,   # placeholder — filled below
             },
+            *stations_entities,
+            *dataobjects_entities,
         ],
     }
 

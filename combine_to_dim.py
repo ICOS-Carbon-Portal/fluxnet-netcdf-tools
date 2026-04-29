@@ -167,6 +167,17 @@ def combine_obspack_gas(store_path: Path, gas: str) -> None:
     src   = np.array([str(per_station_ds[s].attrs.get(f"{gas}_source_doi", ""))          for s in sids], dtype=object)
     cal   = np.array([str(per_station_ds[s].attrs.get(f"{gas}_calibration_scale", ""))   for s in sids], dtype=object)
 
+    # New for Part B: per-station citation, station landing-page URL, and
+    # the per-station obspack file name (for DataObject entities).
+    cite  = np.array([str(per_station_ds[s].attrs.get(f"{gas}_dobj_citation",
+                          per_station_ds[s].attrs.get(f"{gas}_obspack_citation", "")))
+                      for s in sids], dtype=object)
+    surl  = np.array([str(per_station_ds[s].attrs.get("station_landing_page",
+                          per_station_ds[s].attrs.get("site_url", "")))
+                      for s in sids], dtype=object)
+    fname = np.array([str(per_station_ds[s].attrs.get(f"{gas}_dataset_name", ""))
+                      for s in sids], dtype=object)
+
     # 6. Assemble the xr.Dataset
     print(f"    assembling xr.Dataset …", flush=True)
     coords = {
@@ -179,6 +190,9 @@ def combine_obspack_gas(store_path: Path, gas: str) -> None:
         "country":          ("station", cc),
         "source_doi":       ("station", src),
         "calibration_scale":("station", cal),
+        "citation":         ("station", cite),
+        "station_url":      ("station", surl),
+        "dataset_name":     ("station", fname),
         time_dim:           (time_dim, time_union),
     }
     coords.update({d: (d, v) for d, v in extra_coords.items()})
@@ -357,6 +371,11 @@ def combine_fluxnet_freq(store_path: Path, freq: str) -> None:
     cc    = np.array([str(per_station_ds[s].attrs.get("country", ""))                    for s in sids], dtype=object)
     eco   = np.array([str(per_station_ds[s].attrs.get("ecosystem", ""))                  for s in sids], dtype=object)
     src   = np.array([str(per_station_ds[s].attrs.get("source_doi", ""))                 for s in sids], dtype=object)
+    # New for Part B
+    cite  = np.array([str(per_station_ds[s].attrs.get("citation",
+                          per_station_ds[s].attrs.get("PartOfDataset", "")))              for s in sids], dtype=object)
+    surl  = np.array([str(per_station_ds[s].attrs.get("icos_landing_page",
+                          per_station_ds[s].attrs.get("site_url", "")))                  for s in sids], dtype=object)
 
     # 6. Assemble dataset
     print(f"    assembling xr.Dataset …", flush=True)
@@ -369,6 +388,8 @@ def combine_fluxnet_freq(store_path: Path, freq: str) -> None:
         "country":          ("station", cc),
         "ecosystem":        ("station", eco),
         "source_doi":       ("station", src),
+        "citation":         ("station", cite),
+        "station_url":      ("station", surl),
         "time":             ("time", time_union),
     }
     coords.update({d: (d, v) for d, v in extra_coords.items()})
