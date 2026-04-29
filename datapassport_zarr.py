@@ -267,13 +267,35 @@ class _TrackedArray:
             self._da.isel(merged), self._variable, self._group, self._queries
         )
 
+    def where(self, cond, drop: bool = False, other=None) -> "_TrackedArray":
+        """Record `.where()` on a tracked array and delegate."""
+        self._queries.append({
+            "op":       "where",
+            "variable": self._variable,
+            "group":    self._group,
+            "drop":     bool(drop),
+            "cond":     _summarise_condition(cond),
+        })
+        new_da = (self._da.where(cond, drop=drop) if other is None
+                  else self._da.where(cond, other, drop=drop))
+        return _TrackedArray(new_da, self._variable, self._group, self._queries)
+
     def _replace_or_append(self, entry: dict) -> None:
-        """Replace the last query entry if it's a bare __getitem__ for the same variable."""
-        if (self._queries
-                and self._queries[-1].get("variable") == self._variable
-                and self._queries[-1].get("group") == self._group
-                and "sel" not in self._queries[-1]
-                and "isel" not in self._queries[-1]):
+        """Replace the last query entry if it's a bare __getitem__ for the same variable.
+
+        A bare __getitem__ entry has ONLY {variable, group} and no `op` /
+        `sel` / `isel` keys. Other ops like `where` must not be replaced.
+        """
+        last = self._queries[-1] if self._queries else None
+        is_bare_getitem = (
+            last is not None
+            and last.get("variable") == self._variable
+            and last.get("group")    == self._group
+            and "op"   not in last
+            and "sel"  not in last
+            and "isel" not in last
+        )
+        if is_bare_getitem:
             self._queries[-1] = entry
         else:
             self._queries.append(entry)
