@@ -48,10 +48,17 @@ def _resolve_store(store_name: str) -> pathlib.Path | None:
 
 # ── Passport pipeline ────────────────────────────────────────────────────────
 
-async def _mint_passport(s: session.Session) -> str:
+async def _mint_passport(s: session.Session) -> tuple[str, dict, str]:
     """
-    Run the full passport pipeline for *s* and return the Handle PID (or "").
-    Stores the PID on s.passport_pid so GET /{store}/session/passport can retrieve it.
+    Run the full passport pipeline for *s*.
+
+    Returns (pid, passport_jsonld, saved_path):
+      pid              — minted Handle PID, or "" if not configured
+      passport_jsonld  — the full ROCrate JSON-LD passport dict (saved to disk)
+      saved_path       — path of the file written under PASSPORT_DIR
+
+    Stores the PID on s.passport_pid so GET /{store}/session/passport can
+    retrieve it.
     """
     import hashlib
     from . import cp_client
@@ -91,7 +98,7 @@ async def _mint_passport(s: session.Session) -> str:
     matomo_client.track(s, passport_pid=pid)
 
     s.passport_pid = pid
-    return pid
+    return pid, p, str(path)
 
 
 async def _on_session_close(s: session.Session) -> None:
@@ -156,7 +163,7 @@ async def close_session(store_name: str, request: Request) -> JSONResponse:
     except Exception:
         pass
 
-    pid = await _mint_passport(s)
+    pid, passport_jsonld, saved_path = await _mint_passport(s)
 
     # Surviving station list comes from the client's last query entry, written
     # by datapassport_zarr after the where()/sel() chain. Falls back to [].
@@ -171,15 +178,18 @@ async def close_session(store_name: str, request: Request) -> JSONResponse:
     station_sources = _resolve_station_sources(s.store, stations) if stations else []
 
     return JSONResponse({
-        "passport_pid":   pid,
-        "passport_url":   s.passport_pid and f"https://doi.org/{pid}" or "",
-        "chunks":         len(s.chunks),
-        "bytes_served":   s.bytes_total,
-        "arrays":         sorted(s.arrays),
-        "queries":        s.queries,
-        "ip_anonymised":  s.ip_anonymised,
-        "stations":       stations,
+        "passport_pid":    pid,
+        "passport_url":    s.passport_pid and f"https://doi.org/{pid}" or "",
+        "chunks":          len(s.chunks),
+        "bytes_served":    s.bytes_total,
+        "arrays":          sorted(s.arrays),
+        "queries":         s.queries,
+        "ip_anonymised":   s.ip_anonymised,
+        "stations":        stations,
         "station_sources": station_sources,
+        # The full ROCrate JSON-LD passport (same as the .jsonld file on disk)
+        "passport":        passport_jsonld,
+        "passport_path":   saved_path,
     })
 
 
