@@ -255,7 +255,9 @@ def combine_fluxnet_freq(store_path: Path, freq: str) -> None:
         per_station_ds[sid] = ds
         eligible = {v for v in ds.data_vars
                     if not (set(ds[v].dims) & _FLUXNET_SKIP_DIMS)
-                    and "time" in ds[v].dims}
+                    and "time" in ds[v].dims
+                    and "nv" not in ds[v].dims     # skip time_bounds (sparse, breaks HTTP decode)
+                    and v != "time_bounds"}
         common_vars = eligible if common_vars is None else common_vars & eligible
     sids = list(per_station_ds.keys())
     common_vars = sorted(common_vars or [])
