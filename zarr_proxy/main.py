@@ -191,39 +191,45 @@ def _resolve_station_sources(store_name: str, stations: list[str]) -> list[dict]
     store = _resolve_store(store_name)
     if store is None:
         return []
+
+    # Known combined-view group locations (fast — no rglob walk).
+    candidate_groups = ["co2", "ch4", "n2o", "co",
+                        "_combined/fluxnet_dd", "_combined/fluxnet_mm",
+                        "_combined/fluxnet_ww", "_combined/fluxnet_yy"]
+
     try:
         import zarr
-        # Walk every group to find one whose `station` coord values cover
-        # the requested stations. The combined-view groups are at the store
-        # root for obspack (co2/, ch4/, …) and under _combined/ for fluxnet.
-        candidates = []
-        for grp_path in [p.relative_to(store) for p in store.rglob(".zgroup")]:
-            grp_path = str(grp_path.parent).replace("\\", "/")
-            if grp_path == ".":
-                continue
-            try:
-                g = zarr.open_group(str(store), mode="r", path=grp_path)
-            except Exception:
-                continue
-            if "station" in g and "source_doi" in g and "citation" in g:
-                candidates.append((grp_path, g))
-        out: list[dict] = []
-        wanted = set(stations)
-        for _, g in candidates:
-            sids = list(g["station"][:])
-            sdoi = list(g["source_doi"][:])
-            cite = list(g["citation"][:]) if "citation" in g else [""] * len(sids)
-            for sid, doi, cit in zip(sids, sdoi, cite):
-                sid_str = sid.decode() if isinstance(sid, (bytes, bytearray)) else str(sid)
-                if sid_str in wanted and not any(o["station"] == sid_str for o in out):
-                    out.append({
-                        "station":    sid_str,
-                        "source_doi": doi.decode() if isinstance(doi, (bytes, bytearray)) else str(doi),
-                        "citation":   cit.decode() if isinstance(cit, (bytes, bytearray)) else str(cit),
-                    })
-        return out
-    except Exception:
+    except ImportError:
         return []
+
+    out: list[dict] = []
+    wanted = set(stations)
+    seen_stations: set = set()
+
+    for grp_path in candidate_groups:
+        grp_dir = store / grp_path.replace("/", "/")
+        if not (grp_dir / ".zgroup").exists():
+            continue
+        try:
+            g = zarr.open_group(str(store), mode="r", path=grp_path)
+        except Exception:
+            continue
+        if "station" not in g or "source_doi" not in g:
+            continue
+
+        sids = list(g["station"][:])
+        sdoi = list(g["source_doi"][:])
+        cite = list(g["citation"][:]) if "citation" in g else [""] * len(sids)
+        for sid, doi, cit in zip(sids, sdoi, cite):
+            sid_str = sid.decode() if isinstance(sid, (bytes, bytearray)) else str(sid)
+            if sid_str in wanted and sid_str not in seen_stations:
+                out.append({
+                    "station":    sid_str,
+                    "source_doi": doi.decode() if isinstance(doi, (bytes, bytearray)) else str(doi),
+                    "citation":   cit.decode() if isinstance(cit, (bytes, bytearray)) else str(cit),
+                })
+                seen_stations.add(sid_str)
+    return out
 
 
 @app.get("/{store_name}/session/passport")
