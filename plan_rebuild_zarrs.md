@@ -245,6 +245,59 @@ get a much shorter form.
 
 Total: ~2.5 days work.
 
+## Bonus — simplifies the data passport
+
+Today's passport records the SHA-256 of every chunk the proxy served,
+because at the proxy level all we see are byte ranges — not what the user
+*meant* to fetch. That works but ties provenance to a low-level
+implementation detail (chunk layout) rather than to the scientific intent.
+
+With the combined-view store, the user's full query is a single xarray
+expression:
+
+```python
+(ds["co2"]
+   .where((ds.lat.between(50.7, 53.6)) & (ds.lon.between(3.3, 7.3)),
+          drop=True)
+   .sel(time_co2=slice("2024-01-01", "2024-12-31")))
+```
+
+Given a content-addressed snapshot of the store, this expression is
+sufficient to reproduce the result bit-for-bit. The passport collapses
+from "list every byte delivered" to "record what was asked":
+
+```json
+{
+  "store_doi":   "10.18160/...",
+  "store_pid":   "hdl:11676/...",
+  "store_sha":   "<sha-256 of consolidated .zmetadata of the combined group>",
+  "query": {
+    "group":  "co2",
+    "where":  "(lat >= 50.7) & (lat <= 53.6) & (lon >= 3.3) & (lon <= 7.3)",
+    "sel":    {"time_co2": ["2024-01-01", "2024-12-31"]},
+    "result_sha": "<sha-256 of materialized DataArray bytes>"
+  }
+}
+```
+
+Reproducibility check: re-open the store at `store_sha`, run the query,
+hash the result, compare against `result_sha`. One pass = whole passport
+verified. No 134-chunk manifest needed.
+
+**Chunk-level passports remain useful in two cases**:
+
+1. Streaming clients that bypass `datapassport_zarr` — the proxy still
+   can't see the query, only bytes. The `X-DataPassport-Warning` header
+   logic stays for those.
+2. Partial deliveries (timeout / disconnect) where some chunks were
+   missed. Chunk SHAs prove what was vs. wasn't transferred.
+
+For the wrapped-client path (the recommended one), the query-level
+passport is smaller, more meaningful, and content-addresses the
+scientific output rather than the byte stream. **Action**: once the
+combined view is in place, add a `query` block to `passport.build()` and
+demote the chunk manifest to a fallback for unwrapped clients.
+
 ## Decision points before starting
 
 - [ ] Confirm Option B (additive combined groups) is acceptable, vs
