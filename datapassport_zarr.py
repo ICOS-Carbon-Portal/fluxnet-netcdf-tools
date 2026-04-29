@@ -90,6 +90,67 @@ class DataPassportDataset:
     def __iter__(self):
         return iter(self._ds)
 
+    # ── Dataset-level .sel / .isel / .where (record + delegate) ───────────────
+    # Each returns a new DataPassportDataset wrapping the result, so chained
+    # operations (e.g. ds.where(...).sel(time=...).compute()) all log into
+    # the same query list.
+
+    def _wrap(self, new_ds):
+        wrapper = DataPassportDataset.__new__(DataPassportDataset)
+        wrapper._ds            = new_ds
+        wrapper._proxy_url     = self._proxy_url
+        wrapper._group         = self._group
+        wrapper._save_passport = False           # only the root wrapper closes
+        wrapper._passport_dir  = self._passport_dir
+        wrapper._verbose       = False
+        wrapper._passport      = {}              # never close from a derived wrapper
+        wrapper._queries       = self._queries   # share the log
+        return wrapper
+
+    def sel(self, indexers: dict | None = None, **kwargs):
+        merged = {**(indexers or {}), **kwargs}
+        self._queries.append({
+            "op":    "sel",
+            "group": self._group,
+            "sel":   {k: _serialise(v) for k, v in merged.items()},
+        })
+        return self._wrap(self._ds.sel(merged) if merged else self._ds.sel(**kwargs))
+
+    def isel(self, indexers: dict | None = None, **kwargs):
+        merged = {**(indexers or {}), **kwargs}
+        self._queries.append({
+            "op":    "isel",
+            "group": self._group,
+            "isel":  {k: _serialise(v) for k, v in merged.items()},
+        })
+        return self._wrap(self._ds.isel(merged) if merged else self._ds.isel(**kwargs))
+
+    def where(self, cond, drop: bool = False, other=None):
+        """Record `.where()` and delegate. The condition is best-effort
+        introspected (extracts simple coord ≥/≤/== comparisons into a JSON
+        record); for arbitrary masks the human-readable repr is preserved.
+        """
+        self._queries.append({
+            "op":    "where",
+            "group": self._group,
+            "drop":  bool(drop),
+            "cond":  _summarise_condition(cond),
+        })
+        new_ds = (self._ds.where(cond, drop=drop) if other is None
+                  else self._ds.where(cond, other, drop=drop))
+        return self._wrap(new_ds)
+
+    # ── Escape hatch: record an arbitrary user-supplied query entry ───────────
+
+    def record_query(self, entry: dict) -> None:
+        """Append an arbitrary dict to the query log.
+
+        Use when an operation isn't auto-captured (e.g. computed masks,
+        post-processing steps): just record what you did so the passport
+        carries the intent.
+        """
+        self._queries.append({"op": "user_recorded", "group": self._group, **entry})
+
     # ── Session close + passport ──────────────────────────────────────────────
 
     def close(self, verbose: bool | None = None) -> dict:
@@ -243,6 +304,46 @@ def _serialise(v: Any) -> Any:
     except ImportError:
         pass
     return v
+
+
+def _summarise_condition(cond: Any) -> dict:
+    """Best-effort serialisable summary of an xr.where() condition.
+
+    For boolean masks built from simple coord ≥/≤/==/between comparisons
+    (the common spatial-bbox case), pull out per-coord min/max bounds so the
+    passport carries the actual extent. For anything else, fall back to the
+    string repr.
+    """
+    try:
+        import xarray as xr
+        import numpy as np
+    except ImportError:
+        return {"repr": str(cond)}
+
+    if not isinstance(cond, xr.DataArray):
+        return {"repr": str(cond)}
+
+    summary: dict = {}
+
+    # Walk every coord referenced by the mask. For each coord, find the
+    # smallest and largest value where the mask is True — that's the spatial
+    # bounding box implied by the user's expression.
+    for cname in cond.coords:
+        try:
+            cvals = np.asarray(cond.coords[cname].values)
+            mvals = np.asarray(cond.values)
+            if cvals.dtype.kind not in "fi" or cvals.shape != mvals.shape:
+                continue
+            sel = cvals[mvals]
+            if sel.size == 0:
+                continue
+            summary[cname] = {"min": float(sel.min()), "max": float(sel.max())}
+        except Exception:
+            continue
+
+    if not summary:
+        summary["repr"] = str(cond)[:300]
+    return summary
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
