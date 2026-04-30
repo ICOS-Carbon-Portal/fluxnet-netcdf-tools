@@ -167,7 +167,7 @@ dokku config:set zarr-proxy \
 # dokku config:set zarr-proxy HANDLE_TOKEN=... HANDLE_PREFIX=11676 ...
 
 # Public domain (decision: open access for now)
-dokku domains:add zarr-proxy zarr-proxy.icos-ri.eu       # adjust if needed
+dokku domains:add zarr-proxy zarr.icos-cp.eu       # adjust if needed
 dokku letsencrypt:enable zarr-proxy
 
 # Disable Nginx response buffering so zarr-chunk fetches stream cleanly
@@ -314,7 +314,7 @@ No proxy restart needed — it re-reads from disk on every request.
 
 - [x] **Public proxy domain**: **Yes, public, no auth** for now.
       Passports + chunk fetches are open. Add auth only if abuse
-      becomes an issue. `domains:add zarr-proxy.icos-ri.eu` (or a
+      becomes an issue. `domains:add zarr.icos-cp.eu` (or a
       subdomain you pick — confirm before deploy).
 
 - [x] **Image size**: **slim** — new `requirements-server.txt` with
