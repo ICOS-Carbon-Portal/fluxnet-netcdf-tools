@@ -1,0 +1,57 @@
+# Local development stack — same images as Dokku, bound to localhost.
+#
+#   docker compose up --build
+#
+# Browse the Shiny app at  http://localhost:8000
+# The proxy is reachable at http://localhost:8080 (mapped from the inner network).
+#
+# In Dokku these become two separate apps on a shared internal network;
+# see plan_dokku_deploy.md for the deploy commands.
+
+services:
+
+  zarr-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zarr-proxy:dev
+    container_name: zarr-proxy
+    environment:
+      ZARR_STORE_DIR:      /data
+      PASSPORT_DIR:        /data/passports
+      SESSION_TIMEOUT_SEC: "300"
+      # Optional — uncomment + populate to enable PID minting / CP upload:
+      # HANDLE_TOKEN:    "${HANDLE_TOKEN}"
+      # HANDLE_PREFIX:   "11676"
+      # CP_USERNAME:     "${CP_USERNAME}"
+      # CP_PASSWORD:     "${CP_PASSWORD}"
+      # CP_SUBMITTER_ID: "${CP_SUBMITTER_ID}"
+    volumes:
+      # Read-only stores …
+      - ./icos-fluxnet.zarr:/data/icos-fluxnet.zarr:ro
+      - ./icos-obspack.zarr:/data/icos-obspack.zarr:ro
+      # … and a writable passport dir (the proxy creates `passports/<sha>.jsonld`).
+      - ./passports:/data/passports
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  fluxnet-browser:
+    # Build from a local checkout of the shiny repo (sibling directory).
+    # In production this gets pushed to Dokku from the fork directly.
+    build:
+      context: ../shiny_fluxnet_netcdf_browser
+      dockerfile: Dockerfile
+    image: fluxnet-browser:dev
+    container_name: fluxnet-browser
+    environment:
+      ICOS_ZARR_STORE:    http://zarr-proxy:8080/icos-fluxnet.zarr
+      ICOS_OBSPACK_STORE: http://zarr-proxy:8080/icos-obspack.zarr
+      PORT:               "8000"
+    # Override upstream CMD to run the zarr variant of the app.
+    command: ["sh", "-c", "shiny run app_zarr.py --host 0.0.0.0 --port ${PORT}"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      - zarr-proxy
+    restart: unless-stopped

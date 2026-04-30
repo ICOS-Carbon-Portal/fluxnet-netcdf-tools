@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+fsspec
+aiohttp
+xarray
+zarr<3
+numpy
+pandas

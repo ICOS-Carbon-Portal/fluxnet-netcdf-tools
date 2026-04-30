@@ -1,0 +1,12 @@
+# Ship only what the proxy needs; everything else stays out of the image.
+*
+!Dockerfile
+!requirements-server.txt
+!run_proxy.py
+!zarr_proxy/**
+
+# Even within the included tree, drop noise.
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ipynb_checkpoints

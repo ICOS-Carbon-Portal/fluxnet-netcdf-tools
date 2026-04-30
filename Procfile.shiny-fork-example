@@ -1,0 +1,13 @@
+# Drop this file into the ICOS-Carbon-Portal/shiny_fluxnet_netcdf_browser
+# fork as `Procfile` (no extension) at the repo root.
+#
+# Dokku honours a Procfile even when a Dockerfile is present, by appending
+# it as the container CMD. This overrides the upstream default that runs
+# `app.py` (the legacy NetCDF mode), making the deployment serve the zarr
+# variant instead — backed by zarr-proxy on the internal Dokku network.
+#
+# Required env (set on the Dokku app):
+#   ICOS_ZARR_STORE     http://zarr-proxy.web:8080/icos-fluxnet.zarr
+#   ICOS_OBSPACK_STORE  http://zarr-proxy.web:8080/icos-obspack.zarr
+#   PORT                8000        (Dokku injects this automatically)
+web: shiny run app_zarr.py --host 0.0.0.0 --port ${PORT}
