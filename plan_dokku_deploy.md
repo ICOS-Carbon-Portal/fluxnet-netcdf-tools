@@ -360,3 +360,36 @@ Total: ~1–1.5 days.
   rate-limited / authenticated.
 - **Logs / Matomo**: route container logs to ICOS' central
   observability; populate `MATOMO_*` env vars to track usage events.
+
+---
+
+## Reference — which port does the proxy listen on, where?
+
+Dokku exposes the proxy on **port 80** (HTTP) and **port 443** (HTTPS,
+after `letsencrypt:enable`) on the public network — to the user
+hitting `https://zarr.icos-cp.eu`.
+
+Internally, Dokku's Nginx routes those public ports to the container's
+port 8080 (set by `dokku ports:set zarr-proxy http:8080:8080`):
+
+```
+client → https://zarr.icos-cp.eu (TLS, port 443)
+       → Dokku Nginx vhost
+       → http://<container>:8080  (uvicorn)
+```
+
+For the **internal** Dokku network (where the Shiny app talks to the
+proxy), the proxy is reachable at `http://zarr-proxy.web:8080/` — that's
+the container port directly, no Nginx in between.
+
+`dokku ports:set ... http:8080:8080` is `<scheme>:<host-port>:<container-port>`.
+The first `8080` is what Nginx listens on for the upstream connection
+(internal); the public-facing 80/443 mapping is added automatically by
+`dokku domains:add` + `letsencrypt:enable`.
+
+| Audience | URL |
+|---|---|
+| Public (TLS) | `https://zarr.icos-cp.eu` (port 443) |
+| Public HTTP (redirects to HTTPS) | `http://zarr.icos-cp.eu` (port 80) |
+| Other Dokku apps on the internal network | `http://zarr-proxy.web:8080` |
+| `docker run` / dev `docker compose` | `http://localhost:8080` |
