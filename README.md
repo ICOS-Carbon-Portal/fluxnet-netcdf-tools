@@ -1,10 +1,11 @@
-# ICOS toolkit — Fluxnet & Obspack zarr stores and CF-NetCDF4 conversion
+# ICOS toolkit — Fluxnet, Obspack & SOCAT zarr stores and CF-NetCDF4 conversion
 
-Python scripts to build **zarr v2 stores** from ICOS data — both ecosystem
-fluxes (Fluxnet) and atmospheric greenhouse-gas observations (Obspack) —
-and to convert ICOS ETC L2 CSV files (FLUXES, FLUXNET, METEO, METEOSENS)
-to CF-1.12–compliant NetCDF4 files.  Station metadata and citations are
-fetched live from the ICOS Carbon Portal.
+Python scripts to build **zarr v2 stores** from ICOS data — ecosystem fluxes
+(Fluxnet), atmospheric greenhouse-gas observations (Obspack), and ocean
+shipborne / mooring pCO₂ observations (SOCAT) — and to convert ICOS ETC L2
+CSV files (FLUXES, FLUXNET, METEO, METEOSENS) to CF-1.12–compliant NetCDF4
+files.  Station metadata and citations are fetched live from the ICOS
+Carbon Portal.
 
 ## Scripts
 
@@ -245,6 +246,91 @@ work (custom Obspack export, interactive map viewer), see
 The same `run_proxy.py` (below) serves the Obspack store too — point a
 client at `http://host:port/icos-obspack.zarr/HTM150` exactly like the
 Fluxnet store.
+
+---
+
+### `socat2zarr.py` — zarr store from an ICOS Ocean (SOCAT) collection
+
+Companion to `fluxnet2zarr.py` and `obspack2zarr.py` for the ICOS ocean
+thematic centre.  Resolves the SOCAT release-collection DOI (default
+`10.18160/FS17-JBFB`), downloads each per-deployment CSV via the ICOS
+licence-accept endpoint, and writes one zarr group per CSV into
+`icos-socat.zarr`.
+
+The collection is a mix of **moving SOOP cruise legs** (with per-row
+`lon` / `lat`) and **fixed buoy deployments** (constant location).  Both
+shapes share the same group layout: a 1-D `time` axis, optional `lon` /
+`lat` arrays, every CSV column as its own zarr array, plus the per-row
+`_QC` flag arrays.  The filename stem (e.g. `11SS20240501`) is used as
+the cruise/deployment id and the zarr group name.
+
+```
+# Populate the whole release (116 CSVs)
+python socat2zarr.py 10.18160/FS17-JBFB
+
+# Filter by platform-code prefix (4-letter EXPO-like prefix in the filename)
+python socat2zarr.py 10.18160/FS17-JBFB --platform 11SS
+
+# Or by exact filename
+python socat2zarr.py 10.18160/FS17-JBFB --member 11SS20240501.csv
+
+# Manage the store
+python socat2zarr.py list
+python socat2zarr.py info 11SS20240501
+python socat2zarr.py remove 11SS20240501
+```
+
+**`populate` options**
+
+| Option | Default | Description |
+|---|---|---|
+| `doi` | `10.18160/FS17-JBFB` | DOI of the ICOS Ocean release collection |
+| `--store DIR` | `icos-socat.zarr` | Zarr store directory |
+| `--platform PREFIX ...` | all | Filter by filename platform prefix (repeatable) |
+| `--member NAME ...` | all | Filter by exact member filename (repeatable) |
+
+**Store layout**
+
+```
+icos-socat.zarr/
+  119920250401/                ← Thornton Buoy (fixed)
+    .zgroup
+    .zattrs   {station_id, platform_name, fixed:true, lat, lon,
+               time_start/end, citation, source_doi, _provenance, …}
+    time/  Temp/  Temp_QC/  P_sal/  P_sal_QC/
+    pCO2/  pCO2_QC/  fCO2/  fCO2_QC/  xCO2_atm/  …
+  11SS20240501/                ← BE-SOOP-Simon Stevin leg
+    .zgroup
+    .zattrs   {…, fixed:false, …}
+    time/  lon/  lat/  Temp/  P_sal/  pCO2/  fCO2/  xCO2_atm/  …
+  …
+```
+
+Every CSV column is ingested.  Units come from the ICOS Carbon Portal
+column metadata when available, falling back to the `[unit]` suffix in
+the column label (e.g. `Temp [degC]` → `degC`).  CF-style standard
+names are mapped from the ICOS quantity-kind for the ENVRI-relevant
+variables (T, S, xCO₂, pCO₂, fCO₂ in water and air).  The two non-data
+metadata columns shipped per value (`QC Comment`, `Type`) are dropped
+during ingest to keep the array count manageable; the original CSV is
+still recoverable via the source DOI.
+
+`fixed` vs moving is decided from the catalogue's `coverageGeo.type`
+where present, otherwise from the in-file standard deviation of the
+`lon` / `lat` arrays.  Fixed deployments fall back to the buoy's static
+location (in `_zattrs`) when the lon/lat arrays are present-but-constant.
+
+**Reading with xarray**
+
+```python
+import xarray as xr
+ds = xr.open_zarr("icos-socat.zarr", group="11SS20240501")
+print(ds["fCO2"])            # 1-D, time-indexed, units uatm
+print(ds.attrs["station_id"], ds.attrs["citation"])
+```
+
+The same `run_proxy.py` (below) serves the SOCAT store too — point a
+client at `http://host:port/icos-socat.zarr/11SS20240501`.
 
 ---
 
