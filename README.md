@@ -2,10 +2,11 @@
 
 Python scripts to build **zarr v2 stores** from ICOS data — ecosystem fluxes
 (Fluxnet), atmospheric greenhouse-gas observations (Obspack), and ocean
-shipborne / mooring pCO₂ observations (SOCAT) — and to convert ICOS ETC L2
-CSV files (FLUXES, FLUXNET, METEO, METEOSENS) to CF-1.12–compliant NetCDF4
-files.  Station metadata and citations are fetched live from the ICOS
-Carbon Portal.
+shipborne / mooring pCO₂ observations (SOCAT) — to convert ICOS ETC L2 CSV
+files (FLUXES, FLUXNET, METEO, METEOSENS) to CF-1.12–compliant NetCDF4
+files, and to repackage daily gridded GeoTIFFs (e.g. GPP rasters) into
+compact CF-1.8 NetCDF or zarr.  Station metadata and citations are fetched
+live from the ICOS Carbon Portal.
 
 ## Scripts
 
@@ -331,6 +332,128 @@ print(ds.attrs["station_id"], ds.attrs["citation"])
 
 The same `run_proxy.py` (below) serves the SOCAT store too — point a
 client at `http://host:port/icos-socat.zarr/11SS20240501`.
+
+---
+
+### `gpp_tif2nc.py` — daily GPP GeoTIFFs → monthly NetCDF / combined zarr
+
+Repackages a directory of daily GPP rasters (one GeoTIFF per day, named
+`GPP_YYYY_MM_DD.tif`, raw Int16 × 0.001 g C m⁻² day⁻¹ in EPSG:4326) into
+either:
+
+  * one **CF-1.8 NetCDF-4 file per month** that stacks every day in that
+    month along a `time` axis (default mode), or
+  * a **single combined zarr v2 store** with one `time` axis spanning the
+    whole archive (`--zarr` mode); the recommended store name for the
+    2014-2023 release is `EU-GPP-2014-2023.zarr`.
+
+Both modes default to **lossy quantization to 0.1 g C m⁻² day⁻¹**: raw
+values are converted to physical units (×0.001), rounded to 1 decimal,
+and re-encoded as Int16 with `scale_factor=0.1`.  The on-disk range
+becomes 0…~21 000, well inside the 16-bit signed limit, and deflate /
+blosc-zstd shrink the result by 3-5× compared with full-precision
+storage.  Pass `--no-quantize` to keep the raw Int16 bytes verbatim
+(scale_factor=0.001), giving a lossless round-trip at ~2× the size.
+
+Per-month stacking is much more efficient than per-day NetCDF because
+deflate compresses the (lat, lon) chunks individually and the ~30-day
+stack amortises the file-header / chunk-index overhead across many days.
+
+```bash
+# Monthly stacked NetCDFs (default; lossy 0.1 g C m-2 day-1 quantization)
+python gpp_tif2nc.py /path/to/tifs --outdir /data/gpp_monthly
+
+# Append (or build) a combined zarr store
+python gpp_tif2nc.py /path/to/tifs --zarr ./EU-GPP-2014-2023.zarr
+
+# Both at once
+python gpp_tif2nc.py /path/to/tifs --outdir /data/gpp_monthly \
+                                   --zarr   ./EU-GPP-2014-2023.zarr
+
+# Lossless mode (raw scale_factor=0.001, larger files)
+python gpp_tif2nc.py /path/to/tifs --outdir /data/gpp_monthly --no-quantize
+
+# Date-range filter
+python gpp_tif2nc.py /path/to/tifs --start 2014-05-01 --end 2014-12-31
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `indir` | (required) | Directory of `GPP_YYYY_MM_DD.tif` files |
+| `--outdir DIR` | `<indir>` | Output dir for monthly stacked `.nc` files |
+| `--zarr PATH` | — | Append/create a combined zarr store at this path |
+| `--no-nc` | off | Skip writing the per-month NetCDFs (only useful with `--zarr`) |
+| `--no-quantize` | off | Lossless: keep raw Int16 + `scale_factor=0.001` |
+| `--start YYYY-MM-DD` | — | Earliest date to include |
+| `--end YYYY-MM-DD` | — | Latest date to include |
+| `--overwrite` | off | Overwrite existing per-month NetCDFs |
+
+**NetCDF layout** (one file per month):
+
+```
+GPP_2014_05.nc
+  dimensions:   time = 31, lat = 12769, lon = 23521
+  variables:
+    time(time)            f8   "days since 1970-01-01 00:00:00"
+                              calendar=proleptic_gregorian, axis=T
+    lat(lat)              f4   degrees_north, axis=Y
+    lon(lon)              f4   degrees_east,  axis=X
+    gpp(time, lat, lon)   i2   long_name="Gross primary production (carbon)"
+                              units="g m-2 day-1"
+                              scale_factor=0.1 (or 0.001 with --no-quantize)
+                              add_offset=0.0
+                              _FillValue=-9999
+                              grid_mapping="crs"
+                              chunksizes=(1, 512, 512), zlib complevel=6
+    crs                   i4   grid_mapping_name="latitude_longitude"
+                              + WGS-84 ellipsoid params + crs_wkt
+  globals:
+    Conventions = "CF-1.8"
+    title, summary, history, source
+```
+
+Validates against **CF-1.8 cfchecker 4.1.0 with zero errors and zero
+warnings** (single INFO note that the checker can't validate the WKT
+string itself).  No `standard_name` is set on `gpp` — the CF Standard
+Name Table v93 has no terrestrial-GPP entry.  `long_name` + `units`
+serve as the CF fallback.
+
+**Zarr layout** (one combined store):
+
+```
+EU-GPP-2014-2023.zarr/
+  .zgroup, .zattrs (Conventions, title, _provenance, …)
+  time/      f8   ("days since 1970-01-01"), growable on append
+  lat/       f4   shape (12769,)
+  lon/       f4   shape (23521,)
+  gpp/       i2   shape (T, 12769, 23521), chunks (1, 1024, 1024),
+                 blosc(zstd, clevel=5, SHUFFLE), _FillValue=-9999,
+                 scale_factor=0.1 (or 0.001), add_offset=0.0
+```
+
+Re-running over a date already in the store is idempotent: the existing
+slice is overwritten in place, no duplicate `time` rows are appended.
+After every batch, `zarr.consolidate_metadata` is called so downstream
+clients can use `consolidated=True` reads.
+
+**Reading with xarray**:
+
+```python
+import xarray as xr
+
+# Per-month NetCDF
+ds = xr.open_dataset("GPP_2014_05.nc")
+print(ds["gpp"])            # auto-decoded to physical g C m-2 day-1
+
+# Combined zarr (whole archive, lazy)
+zds = xr.open_zarr("EU-GPP-2014-2023.zarr", consolidated=True)
+may2014 = zds["gpp"].sel(time=slice("2014-05-01", "2014-05-31"))
+```
+
+**Dependencies** — `numpy`, `netCDF4`, `zarr<3`, plus the GDAL CLI
+(`gdal-bin`) for `gdalinfo` / `gdal_translate`.  Reading TIFFs goes
+through a temporary ENVI raw raster written by `gdal_translate` (no
+`rasterio` / `python-gdal` binding required).
 
 ---
 
