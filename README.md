@@ -335,6 +335,53 @@ client at `http://host:port/icos-socat.zarr/11SS20240501`.
 
 ---
 
+### `socat_track_explorer.ipynb` — interactive cruise/buoy explorer
+
+Companion notebook to `socat2zarr.py`.  Two dropdowns (ship/buoy →
+cruise) load any deployment in the SOCAT zarr store and render it as a
+**Plotly Scattergeo / Natural Earth** map paired with a synced **fCO₂
+time-series** below.  Hovering on either subplot highlights the same
+sample on the other (bidirectional cross-hover via `go.FigureWidget`).
+
+```python
+# top-of-notebook configuration
+STORE_URL = "https://zarr.icos-cp.eu/icos-socat.zarr"     # public proxy
+# STORE_URL = "http://localhost:8001/icos-socat.zarr"     # local proxy fallback
+
+PRIMARY_VAR = "fCO2"     # zarr array name; QC array is f"{PRIMARY_VAR}_QC"
+QC_KEEP_MAX = 2          # WOCE: keep flag <= 2; drop 3/4/9
+```
+
+**Behaviour highlights:**
+
+- **WOCE QC masking** — every cruise is filtered to rows where
+  `fCO2_QC ≤ 2`, `lon_QC ≤ 2`, and `lat_QC ≤ 2` before plotting.
+- **Colour scale** anchored at the cruise's 2nd / 98th-percentile of
+  QC-passing fCO₂ (cmocean.delta), matching the ENVRI Data Discovery
+  app exactly.
+- **Time-series gap handling** — the line is broken across gaps that
+  exceed 4× the median sampling interval, so SOOP in-port idle
+  stretches don't draw straight lines across days.
+- **Pan / zoom preserved** across track switches via Plotly
+  `uirevision`; the figure widget is built once and mutated through
+  `fig.batch_update()`.
+- **Map detail** — Natural Earth projection with 50 m coastlines (the
+  highest Plotly Scattergeo offers), country borders, subunits, and
+  rivers.
+
+**Dependencies:**
+
+```bash
+pip install xarray "zarr<3" fsspec aiohttp ipywidgets numpy plotly anywidget
+```
+
+`anywidget ≥ 0.9` ships a prebuilt JupyterLab extension that's required
+for `go.FigureWidget` to render in JupyterLab 4.  Restart the Jupyter
+server after installing it (kernel-only restart isn't enough) and hard-
+reload the browser.
+
+---
+
 ### `gpp_tif2nc.py` — daily GPP GeoTIFFs → monthly NetCDF / combined zarr
 
 Repackages a directory of daily GPP rasters (one GeoTIFF per day, named
