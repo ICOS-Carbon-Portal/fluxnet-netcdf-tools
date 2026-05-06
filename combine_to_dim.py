@@ -425,6 +425,204 @@ def combine_fluxnet_freq(store_path: Path, freq: str) -> None:
     print(f"    done ({raw_size / 1e6:.1f} MB in-memory before zarr compression)")
 
 
+# ── SOCAT ────────────────────────────────────────────────────────────────────
+
+# SOCAT zarr stores have one group per cruise leg / buoy deployment (named after
+# the source CSV stem, e.g. "11SS20240501").  This combines them into a single
+# `(deployment, time)` view.  Differences from the fluxnet/obspack combiners:
+#
+#  • lat/lon are *per row*, not per station — so they're 2-D
+#    coords on (deployment, time), padded with NaN where a deployment
+#    has no sample at the union timestamp.
+#  • WOCE QC masking is applied per-variable at scatter time (flag <= 2),
+#    matching what the ENVRI app does on the per-cruise path.
+#  • Static metadata (station_id, platform_name, fixed, source_doi, citation)
+#    is exposed as 1-D coords along `deployment`.
+
+# ENVRI ocean variables of interest + the matching QC array name.  We only
+# combine these; the fuller per-row set (Equilibrator Pressure, etc.) is
+# still queryable per-cruise.
+_SOCAT_VARS: list[tuple[str, str]] = [
+    ("Temp",     "Temp_QC"),
+    ("P_sal",    "P_sal_QC"),
+    ("xCO2_atm", "xCO2_atm_QC"),
+    ("pCO2",     "pCO2_QC"),
+    ("fCO2",     "fCO2_QC"),
+]
+
+
+def combine_socat(store_path: Path) -> None:
+    """Build {store}/_combined as a (deployment, time) view of all cruises."""
+    z = zarr.open_group(str(store_path), mode="r")
+    cruises = sorted(s for s in z.group_keys() if not s.startswith("_"))
+    if not cruises:
+        print("  no cruise groups; skipping")
+        return
+    print(f"  {len(cruises)} cruise/deployment group(s)")
+
+    # 1. Open every cruise (lazy) and find ones that actually carry the vars
+    print("    scanning per-cruise time axes …", flush=True)
+    per_ds: dict[str, xr.Dataset] = {}
+    for cid in cruises:
+        try:
+            ds = xr.open_zarr(str(store_path), group=cid, consolidated=True)
+        except Exception as exc:
+            print(f"    [{cid}] open failed: {exc}; skipping")
+            continue
+        if "time" not in ds:
+            continue
+        per_ds[cid] = ds
+    cruises = list(per_ds.keys())
+
+    # 2. Build the union time axis
+    print("    building union time axis …", flush=True)
+    all_times: set = set()
+    for cid in cruises:
+        all_times.update(per_ds[cid]["time"].values)
+    time_union = np.array(sorted(all_times), dtype="datetime64[ns]")
+    n_dep, n_t = len(cruises), len(time_union)
+    print(f"    union: {n_t} timestamps "
+          f"({str(time_union[0])[:10]} → {str(time_union[-1])[:10]})  "
+          f"× {n_dep} deployments")
+
+    # 3. Allocate target arrays.  Float32 NaN-padded; QC-masked at fill.
+    arrays: dict[str, np.ndarray] = {}
+    var_attrs: dict[str, dict] = {}
+    for v, _qc in _SOCAT_VARS:
+        # Use the first cruise that has this var as the attr template
+        attrs = {}
+        for cid in cruises:
+            if v in per_ds[cid]:
+                attrs = dict(per_ds[cid][v].attrs)
+                break
+        var_attrs[v] = attrs
+        arrays[v] = np.full((n_dep, n_t), np.nan, dtype="float32")
+
+    # 2-D lon/lat — NaN-padded (fixed buoys broadcast their static value
+    # across their deployment's time slots).
+    lon2d = np.full((n_dep, n_t), np.nan, dtype="float32")
+    lat2d = np.full((n_dep, n_t), np.nan, dtype="float32")
+
+    # 4. Scatter per cruise
+    print("    allocating + scattering …", flush=True)
+    for i, cid in enumerate(cruises):
+        ds   = per_ds[cid]
+        t_st = ds["time"].values
+        idx  = np.searchsorted(time_union, t_st)
+
+        # Lon/lat: prefer the per-row arrays when present; otherwise broadcast
+        # the static lat/lon from group attrs across the deployment's time.
+        if "lon" in ds and "lat" in ds:
+            lo = ds["lon"].values.astype("float32")
+            la = ds["lat"].values.astype("float32")
+            # Position QC, when present, masks both lon and lat
+            pos_ok = np.ones(t_st.size, dtype=bool)
+            for q in ("lon_QC", "lat_QC"):
+                if q in ds:
+                    qv = ds[q].values
+                    pos_ok &= (qv >= 0) & (qv <= 2)
+            lo = np.where(pos_ok, lo, np.nan)
+            la = np.where(pos_ok, la, np.nan)
+            lon2d[i, idx] = lo
+            lat2d[i, idx] = la
+        else:
+            sa = ds.attrs
+            slat = sa.get("lat", np.nan)
+            slon = sa.get("lon", np.nan)
+            try:
+                slat_f = float(slat); slon_f = float(slon)
+                lon2d[i, idx] = slon_f
+                lat2d[i, idx] = slat_f
+            except (TypeError, ValueError):
+                pass
+
+        # Science variables: WOCE-mask, then scatter
+        for v, qc_name in _SOCAT_VARS:
+            if v not in ds:
+                continue
+            vals = ds[v].values.astype("float32")
+            ok = np.isfinite(vals)
+            if qc_name in ds:
+                qv = ds[qc_name].values
+                ok &= (qv >= 0) & (qv <= 2)
+            vals = np.where(ok, vals, np.nan)
+            arrays[v][i, idx] = vals
+
+        if (i + 1) % 10 == 0 or (i + 1) == n_dep:
+            print(f"      {i+1}/{n_dep} deployments scattered", flush=True)
+
+    # 5. Per-deployment static coords from each cruise's .zattrs
+    def _attr_str(ds: xr.Dataset, *keys) -> str:
+        for k in keys:
+            v = ds.attrs.get(k)
+            if v not in (None, ""):
+                return str(v)
+        return ""
+
+    def _attr_bool(ds: xr.Dataset, key: str) -> bool:
+        v = ds.attrs.get(key)
+        return bool(v)
+
+    station_id = np.array([_attr_str(per_ds[c], "station_id")    for c in cruises], dtype=object)
+    platform   = np.array([_attr_str(per_ds[c], "platform_name") for c in cruises], dtype=object)
+    fixed      = np.array([_attr_bool(per_ds[c], "fixed")        for c in cruises], dtype=bool)
+    source_doi = np.array([_attr_str(per_ds[c], "source_doi", "object_pid") for c in cruises], dtype=object)
+    citation   = np.array([_attr_str(per_ds[c], "citation")      for c in cruises], dtype=object)
+    cc         = np.array([_attr_str(per_ds[c], "country_code")  for c in cruises], dtype=object)
+
+    # Re-prefix bare PIDs (e.g. "11676/abc") with the Handle resolver
+    source_doi = np.array(
+        [s if s.startswith("http") or s == "" else f"https://hdl.handle.net/{s}"
+         for s in source_doi], dtype=object,
+    )
+
+    # 6. Assemble dataset
+    print("    assembling xr.Dataset …", flush=True)
+    coords = {
+        "deployment":     ("deployment", np.array(cruises, dtype=object)),
+        "station_id":     ("deployment", station_id),
+        "platform_name":  ("deployment", platform),
+        "fixed":          ("deployment", fixed),
+        "country_code":   ("deployment", cc),
+        "source_doi":     ("deployment", source_doi),
+        "citation":       ("deployment", citation),
+        "lon":            (("deployment", "time"), lon2d),
+        "lat":            (("deployment", "time"), lat2d),
+        "time":           ("time", time_union),
+    }
+    data_vars = {
+        v: (("deployment", "time"), arrays[v], var_attrs[v])
+        for v, _ in _SOCAT_VARS
+    }
+
+    out = xr.Dataset(data_vars=data_vars, coords=coords)
+    out.attrs.update({
+        "n_deployments": n_dep,
+        "time_min":      str(time_union[0])[:19] + "Z",
+        "time_max":      str(time_union[-1])[:19] + "Z",
+        "qc_filter":     "WOCE flag <= 2 on the variable's QC and on lon_QC/lat_QC",
+        "source":        "icos-socat.zarr (per-cruise groups)",
+        "build_tool":    "combine_to_dim.py socat",
+        "Conventions":   "CF-1.7",
+    })
+
+    # Chunking: full deployment axis × ~year-of-minutes along time.  SOOP cadence
+    # is ~1 min; n_t for an annual subset is ~525k, so 65 536 keeps any single
+    # bbox query inside ~8 chunks.
+    chunks = {"deployment": n_dep, "time": min(n_t, 65_536)}
+    for v, _ in _SOCAT_VARS:
+        out[v].encoding = {"chunks": (chunks["deployment"], chunks["time"])}
+    for c in ("lon", "lat"):
+        out[c].encoding = {"chunks": (chunks["deployment"], chunks["time"])}
+
+    out_group = "_combined"
+    print(f"    writing → {store_path}/{out_group} …", flush=True)
+    out.to_zarr(str(store_path), group=out_group, mode="w", consolidated=False)
+    zarr.consolidate_metadata(str(store_path / "_combined"))
+    raw_size = sum(arrays[v].nbytes for v in arrays) + lon2d.nbytes + lat2d.nbytes
+    print(f"    done ({raw_size / 1e6:.1f} MB in-memory before zarr compression)")
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -446,6 +644,10 @@ def main() -> None:
                     default=["fluxnet_dd", "fluxnet_mm", "fluxnet_ww", "fluxnet_yy"],
                     help="Frequency sub-groups to combine")
 
+    sp = sub.add_parser("socat")
+    sp.add_argument("--store", default="icos-socat.zarr",
+                    help="Path to SOCAT zarr store")
+
     args = p.parse_args()
     if not args.command:
         p.print_help()
@@ -465,6 +667,11 @@ def main() -> None:
         for freq in args.freq:
             print(f"\n━━━ fluxnet / {freq} ━━━")
             combine_fluxnet_freq(store, freq)
+        print("\nReconsolidating store-root metadata …", flush=True)
+        zarr.consolidate_metadata(str(store))
+    elif args.command == "socat":
+        print(f"\n━━━ socat / _combined ━━━")
+        combine_socat(store)
         print("\nReconsolidating store-root metadata …", flush=True)
         zarr.consolidate_metadata(str(store))
 

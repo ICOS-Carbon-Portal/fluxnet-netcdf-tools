@@ -528,13 +528,22 @@ python combine_to_dim.py fluxnet
 #   icos-fluxnet.zarr/_combined/fluxnet_mm
 #   icos-fluxnet.zarr/_combined/fluxnet_ww
 #   icos-fluxnet.zarr/_combined/fluxnet_yy
+
+# SOCAT — one combined group across all cruises/deployments
+python combine_to_dim.py socat
+# → icos-socat.zarr/_combined  (116 deployments × ~1.1 M timestamps,
+#   indexed dim is `deployment` instead of `station`; lat/lon are
+#   2-D (deployment, time) because SOCAT lat/lon vary along the cruise.
+#   QC-failed rows (WOCE flag > 2) are NaN-padded at build time.)
 ```
 
 Variables with station-specific dimensions (`soil_layer` for fluxnet
 TS / SWC; `r`/`h`/`v` profile dims) are skipped automatically — they stay only
 in the per-station view.  Time axes are unioned across stations; missing
 samples are NaN-filled and zarr's chunk compression keeps NaN-only chunks
-small (e.g. 4 obspack gases × all-stations time = ~290 MB on disk).
+small (e.g. 4 obspack gases × all-stations time = ~290 MB on disk; the
+SOCAT combined view is even sparser at ~50 MB on disk for 116
+deployments × 1.1 M timestamps × 5 variables, vs. ~3.6 GB uncompressed).
 
 **Querying a combined group is one xarray expression**:
 
@@ -566,8 +575,26 @@ xarray pattern reference:
 | Specific station IDs | `.sel(station=[...])` | `station` is the indexed dim |
 | Predicate over a coord (prefix, regex, etc.) | build a mask, then `.sel(station=...)` or `.where()` | needs evaluation in Python |
 
+SOCAT uses the same idiom but indexes on `deployment` instead of
+`station`, with 2-D `lat(deployment, time)` and `lon(deployment, time)`
+because SOCAT lat/lon vary along a cruise:
+
+```python
+ds = xr.open_zarr("icos-socat.zarr", group="_combined")
+
+nl_2024 = (
+    ds["fCO2"]
+      .where((ds.lat >= 50.7) & (ds.lat <= 53.6) &
+             (ds.lon >=  3.3) & (ds.lon <=  7.3),
+             drop=True)
+      .sel(time=slice("2024-01-01", "2024-12-31"))
+)
+# Coords station_id / platform_name / fixed / source_doi / citation
+# travel with the DataArray, indexed by `deployment`.
+```
+
 See `nl_2024_minimal.ipynb` for a worked Netherlands-2024 query against
-both stores in two short cells (direct file access + via the proxy).
+all three stores in three short cells (direct file access + via the proxy).
 
 The design rationale and remaining open questions (sparse-chunk sizing,
 query-level passport upgrade) live in `plan_rebuild_zarrs.md`.
