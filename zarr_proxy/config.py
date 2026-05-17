@@ -9,6 +9,10 @@ import os
 # Each store is served under its directory name: GET /{store-name}/{key}
 ZARR_STORE_DIR      = os.getenv("ZARR_STORE_DIR", ".")
 
+# Rescan interval in seconds: how often the proxy re-walks ZARR_STORE_DIR
+# to log added / removed stores.  Set to 0 to disable the periodic rescan.
+STORE_RESCAN_SEC    = int(os.getenv("STORE_RESCAN_SEC",   "60"))
+
 # ── Session tracking ──────────────────────────────────────────────────────────
 SESSION_TIMEOUT_SEC = int(os.getenv("SESSION_TIMEOUT_SEC", "300"))
 

@@ -11,7 +11,14 @@ Every chunk response is recorded into a session keyed by (client IP, store).
 When a session goes idle (SESSION_TIMEOUT_SEC), a passport is minted,
 a Handle PID is created, the passport is uploaded to ICOS CP, and a
 Matomo tracking event is fired.
+
+A background task periodically re-scans ZARR_STORE_DIR (interval set by
+STORE_RESCAN_SEC, default 60 s) and logs any store added or removed.
+The store list is otherwise read live from disk on every request, so
+new stores are reachable as soon as they're created — the rescan is
+just a periodic ground-truth refresh + visible log line for operators.
 """
+import asyncio
 import json
 import logging
 import pathlib
@@ -28,6 +35,44 @@ log = logging.getLogger("zarr_proxy")
 STORE_DIR = pathlib.Path(config.ZARR_STORE_DIR).resolve()
 
 
+# ── Live store inventory (refreshed by the rescan task) ───────────────────────
+
+def _scan_stores() -> set[str]:
+    """Walk STORE_DIR and return every directory that looks like a zarr store."""
+    if not STORE_DIR.is_dir():
+        return set()
+    return {
+        p.name for p in STORE_DIR.iterdir()
+        if p.is_dir() and ((p / ".zgroup").exists() or (p / ".zmetadata").exists())
+    }
+
+
+# Holds the most recent inventory seen by the rescan task. Updated atomically
+# by replacing the set; readers always get a coherent snapshot. Initially
+# empty — populated by the lifespan startup before traffic begins.
+_known_stores: set[str] = set()
+
+
+async def _rescan_stores_loop(interval: int) -> None:
+    """Background task: refresh _known_stores and log any deltas."""
+    global _known_stores
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            current = _scan_stores()
+            added   = sorted(current - _known_stores)
+            removed = sorted(_known_stores - current)
+            if added:
+                log.info("[rescan] added: %s", added)
+            if removed:
+                log.info("[rescan] removed: %s", removed)
+            _known_stores = current
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:                          # never let the task die
+            log.warning("[rescan] error: %s", exc)
+
+
 # ── Store resolution ──────────────────────────────────────────────────────────
 
 def _resolve_store(store_name: str) -> pathlib.Path | None:
@@ -35,6 +80,9 @@ def _resolve_store(store_name: str) -> pathlib.Path | None:
     Return the resolved store path if *store_name* is a valid zarr store
     inside STORE_DIR, or None if it doesn't exist / is a path traversal attempt.
     Requires a .zgroup or .zmetadata marker to reject non-zarr directories.
+
+    Reads the filesystem live every time so a newly added store is usable
+    immediately (without waiting for the next periodic rescan).
     """
     store = (STORE_DIR / store_name).resolve()
     if not str(store).startswith(str(STORE_DIR)):
@@ -109,12 +157,32 @@ async def _on_session_close(s: session.Session) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _known_stores
     session.register_on_close(_on_session_close)
     session.start_reaper()
-    stores = [p.name for p in STORE_DIR.iterdir()
-              if p.is_dir() and ((p / ".zgroup").exists() or (p / ".zmetadata").exists())]
-    log.info("zarr_proxy serving %d store(s) from %s: %s", len(stores), STORE_DIR, stores)
-    yield
+
+    _known_stores = _scan_stores()
+    log.info(
+        "zarr_proxy serving %d store(s) from %s: %s",
+        len(_known_stores), STORE_DIR, sorted(_known_stores),
+    )
+
+    rescan_task: asyncio.Task | None = None
+    if config.STORE_RESCAN_SEC > 0:
+        rescan_task = asyncio.create_task(
+            _rescan_stores_loop(config.STORE_RESCAN_SEC)
+        )
+        log.info("[rescan] periodic store rescan enabled (every %ds)",
+                 config.STORE_RESCAN_SEC)
+    try:
+        yield
+    finally:
+        if rescan_task is not None:
+            rescan_task.cancel()
+            try:
+                await rescan_task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title="zarr-passport-proxy", lifespan=lifespan)
@@ -132,10 +200,32 @@ def _client_ip(request: Request) -> str:
 
 @app.get("/")
 async def root() -> JSONResponse:
-    """List available zarr stores."""
-    stores = [p.name for p in STORE_DIR.iterdir()
-              if p.is_dir() and ((p / ".zgroup").exists() or (p / ".zmetadata").exists())]
-    return JSONResponse({"stores": sorted(stores)})
+    """List available zarr stores (always reflects current disk state)."""
+    return JSONResponse({"stores": sorted(_scan_stores())})
+
+
+@app.post("/admin/rescan")
+async def admin_rescan() -> JSONResponse:
+    """
+    Force an immediate rescan of ZARR_STORE_DIR and return the deltas
+    against the previously-known set.  Useful after dropping a new
+    store onto a long-running proxy without waiting for the periodic
+    refresh.
+    """
+    global _known_stores
+    current = _scan_stores()
+    added   = sorted(current - _known_stores)
+    removed = sorted(_known_stores - current)
+    if added:
+        log.info("[rescan] (manual) added: %s", added)
+    if removed:
+        log.info("[rescan] (manual) removed: %s", removed)
+    _known_stores = current
+    return JSONResponse({
+        "stores":  sorted(current),
+        "added":   added,
+        "removed": removed,
+    })
 
 
 # ── Per-store session endpoints ───────────────────────────────────────────────
